@@ -69,6 +69,32 @@ claude mcp add trolley -- ~/bin/trolley mcp
 | `press_key` | 단축키. 문자·숫자·F키 포함 (`cmd+n` 등) |
 | `set_ax_value` | AXValue 직접 쓰기 + readback 확인 |
 | `wait_for_element` | 요소가 나타날 때까지 폴링 (sleep 추정 대체) |
+| `screenshot` | 메인 디스플레이(또는 영역)를 JPEG 이미지 블록으로 반환. 픽셀→포인트 변환 정보 포함 |
+| `click_at` | 전역 포인트 좌표로 부드럽게 이동 후 클릭 (커서 애니메이션) |
+| `move_mouse` | 클릭 없이 부드럽게 이동만 (호버 상태용) |
+
+### 하이브리드 워크플로: AX가 막히면 스크린샷으로
+
+Chromium/Electron 웹 콘텐츠는 `thorough=true`로도 AX 트리가 열리지 않는 경우가 있다.
+그 지점부터는 **스크린샷+비전**으로 전환한다: `screenshot`이 화면을 이미지 블록으로
+돌려주면, 비전을 가진 MCP 클라이언트(Claude 등)가 눈으로 보고 `click_at`으로 좌표를
+클릭한다. `snapshot`이 빈 트리를 돌려줄 때와 `ELEMENT_NOT_FOUND` 에러의 hint가 이
+전환을 직접 안내한다.
+
+좌표 계약: AX 프레임과 `click_at`은 모두 전역 화면 **포인트**(좌상단 원점)를 쓴다.
+스크린샷은 기본적으로 1 이미지픽셀 = 1 포인트로 정규화되며(`pointsPerPixel: 1.0`),
+`maxWidth`로 더 줄이면 비율이 올라가므로 응답의 `pointsPerPixel`과 `capturedRegion`으로
+환산한다 — 공식은 툴 description에 있다.
+
+모든 마우스 동작(`click_at`, `move_mouse`, AXPress 실패 시 폴백 클릭)은 순간이동이
+아니라 **이지징 곡선으로 미끄러진다**(거리에 따라 0.15~0.6초, 60fps `.mouseMoved`
+이벤트). 지켜보는 사람이 자동화가 뭘 하는지 눈으로 따라갈 수 있고, 호버 상태를 읽는
+앱에도 자연스러운 이벤트 흐름이 전달된다.
+
+`screenshot`은 **화면 기록 권한**이 필요하다(손쉬운 사용과 별개, 같은 바이너리 경로에
+부여). 손쉬운 사용과 달리 부여 후 **trolley를 재시작해야** 적용된다.
+`check-permissions`가 두 권한을 함께 보고하며, 화면 기록이 없어도 AX 툴은 전부
+동작한다.
 
 ### 설계상 지켜지는 것
 
