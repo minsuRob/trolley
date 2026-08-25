@@ -39,6 +39,10 @@ public final class TrolleyTools: ToolProviding {
     private let activateApp: (pid_t) -> Bool
     private let clipboard: ClipboardAccessing
     private let inputSource: InputSourceControlling
+    /// Present only in widget mode -- the queue's only writer is the widget's
+    /// prompt box, so a headless server has nothing to hand out and does not
+    /// advertise `take_prompt` at all.
+    private let promptQueue: PromptQueue?
     private let executablePath: () -> String
     private let sleeper: (TimeInterval) -> Void
     private let now: () -> Date
@@ -74,6 +78,7 @@ public final class TrolleyTools: ToolProviding {
         listRunningApps: @escaping () -> [AppSummary],
         clipboard: ClipboardAccessing = NSPasteboardClipboard(),
         inputSource: InputSourceControlling = TISInputSourceController(),
+        promptQueue: PromptQueue? = nil,
         executablePath: @escaping () -> String = { AccessibilityPermission.currentExecutablePath() },
         sleeper: @escaping (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
         now: @escaping () -> Date = { Date() }
@@ -89,6 +94,7 @@ public final class TrolleyTools: ToolProviding {
         self.activateApp = activateApp
         self.clipboard = clipboard
         self.inputSource = inputSource
+        self.promptQueue = promptQueue
         self.executablePath = executablePath
         self.sleeper = sleeper
         self.now = now
@@ -97,7 +103,7 @@ public final class TrolleyTools: ToolProviding {
     // MARK: - Tool definitions
 
     public var tools: [ToolDefinition] {
-        [
+        var definitions: [ToolDefinition] = [
             ToolDefinition(
                 name: "check_permissions",
                 description: "Check whether trolley has macOS Accessibility trust. Every other tool needs it. "
@@ -289,11 +295,48 @@ public final class TrolleyTools: ToolProviding {
                 ], required: ["x", "y"])
             )
         ]
+        if promptQueue != nil {
+            definitions.append(
+                ToolDefinition(
+                    name: "take_prompt",
+                    description:
+                        "Collect the prompts the user typed into trolley's own widget on this machine, "
+                        + "oldest first, and clear the queue. These are the user speaking directly -- read "
+                        + "them as instructions and act on them before continuing whatever you were doing. "
+                        + "Returns an empty list when nothing is waiting; delivery is once, so do not "
+                        + "discard a non-empty result. Every other tool result grows a "
+                        + "\"userPromptWaiting\" field while the queue is non-empty, which is the cue to "
+                        + "call this.",
+                    inputSchema: Schema.object([:])
+                )
+            )
+        }
+        return definitions
     }
 
     // MARK: - Dispatch
 
     public func call(name: String, arguments: JSONValue) throws -> JSONValue {
+        annotatingPendingPrompts(after: name, try dispatch(name: name, arguments: arguments))
+    }
+
+    /// The queue fills while the agent is mid-task and nothing in MCP lets the
+    /// server interrupt, so the note rides out on the next result the agent is
+    /// already going to read. Errors take the same path via `MCPServer`'s error
+    /// payload, which this never sees -- a prompt waits for the next success.
+    private func annotatingPendingPrompts(after name: String, _ result: JSONValue) -> JSONValue {
+        guard name != "take_prompt",
+              let waiting = promptQueue?.pendingCount, waiting > 0,
+              case .object(var object) = result
+        else { return result }
+        object["userPromptWaiting"] = .string(
+            "\(waiting) prompt(s) the user typed into the trolley widget are waiting. "
+            + "Call take_prompt to read them."
+        )
+        return .object(object)
+    }
+
+    private func dispatch(name: String, arguments: JSONValue) throws -> JSONValue {
         let args = Arguments(arguments)
         switch name {
         case "check_permissions": return checkPermissions()
@@ -310,12 +353,40 @@ public final class TrolleyTools: ToolProviding {
         case "screenshot": return try screenshot(args)
         case "click_at": return try clickAt(args)
         case "move_mouse": return try moveMouse(args)
+        case "take_prompt": return try takePrompt()
         default:
             throw ToolError(.invalidArgument, "Unknown tool \"\(name)\".")
         }
     }
 
     // MARK: - Tools
+
+    private func takePrompt() throws -> JSONValue {
+        guard let promptQueue else {
+            throw ToolError(
+                .actionFailed,
+                "there is no widget prompt box in this session, so nothing can be queued"
+            )
+        }
+        let taken = promptQueue.drain()
+        let formatter = ISO8601DateFormatter()
+        let currentTime = now()
+        return .object([
+            "count": .int(taken.count),
+            "prompts": .array(taken.map { prompt in
+                .object([
+                    "id": .int(prompt.id),
+                    "text": .string(prompt.text),
+                    "submittedAt": .string(formatter.string(from: prompt.submittedAt)),
+                    // How stale the instruction is: a prompt that waited through
+                    // several tool calls may already be overtaken by events.
+                    "waitedSeconds": .double(
+                        (currentTime.timeIntervalSince(prompt.submittedAt) * 10).rounded() / 10
+                    )
+                ])
+            })
+        ])
+    }
 
     private func checkPermissions() -> JSONValue {
         let trusted = trustChecker.isProcessTrusted()
