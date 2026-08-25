@@ -59,20 +59,25 @@ public final class StatusWidgetController {
     private let permissions: () -> (ax: Bool, screenRecording: Bool)
     private let promptQueue: PromptQueue
     private let onQuit: () -> Void
+    private let onOpenSettings: (() -> Void)?
 
     /// - Parameter promptQueue: shared with the tool provider -- the panel's
     ///   prompt box is the writer, `take_prompt` the reader.
     /// - Parameter onQuit: what "위젯 종료" does. Injected so this module never
     ///   decides how the process dies -- `trolley mcp` exits the same way it does
     ///   on stdin EOF.
+    /// - Parameter onOpenSettings: shown in the menu when the host has a setup
+    ///   window to offer. Omitted by a server that only draws the widget.
     public init(
         permissions: @escaping () -> (ax: Bool, screenRecording: Bool),
         promptQueue: PromptQueue = PromptQueue(),
-        onQuit: @escaping () -> Void = { NSApplication.shared.terminate(nil) }
+        onQuit: @escaping () -> Void = { NSApplication.shared.terminate(nil) },
+        onOpenSettings: (() -> Void)? = nil
     ) {
         self.permissions = permissions
         self.promptQueue = promptQueue
         self.onQuit = onQuit
+        self.onOpenSettings = onOpenSettings
 
         let size = Self.widgetSize
         panel = WidgetPanel(
@@ -141,6 +146,20 @@ public final class StatusWidgetController {
                 }
             }
         )
+    }
+
+    /// Activity that happened in another process -- see `ActivityBridge`. Same
+    /// path as the in-process observer, so a forwarded call animates exactly like
+    /// a local one.
+    public func record(started tool: String) {
+        apply(.started(tool: tool))
+    }
+
+    public func record(finished tool: String, isError: Bool, duration: TimeInterval) {
+        log.record(ActivityLog.Entry(
+            name: tool, finishedAt: Date(), isError: isError, duration: duration
+        ))
+        apply(.finished(isError: isError))
     }
 
     public func show() {
@@ -295,16 +314,26 @@ public final class StatusWidgetController {
 
         // Names the process the quit item kills, and gives the PID to anyone who
         // would rather reach for `kill`.
-        let info = NSMenuItem(title: "trolley mcp — PID \(getpid())", action: nil, keyEquivalent: "")
+        let info = NSMenuItem(title: "trolley — PID \(getpid())", action: nil, keyEquivalent: "")
         info.isEnabled = false
         menu.addItem(info)
         menu.addItem(.separator())
+
+        if onOpenSettings != nil {
+            let settings = NSMenuItem(title: "설정 열기", action: #selector(openSettings), keyEquivalent: "")
+            settings.target = self
+            menu.addItem(settings)
+        }
 
         let quit = NSMenuItem(title: "위젯 종료", action: #selector(quitWidget), keyEquivalent: "")
         quit.target = self
         menu.addItem(quit)
 
         NSMenu.popUpContextMenu(menu, with: event, for: iconView)
+    }
+
+    @objc private func openSettings() {
+        onOpenSettings?()
     }
 
     @objc private func quitWidget() {

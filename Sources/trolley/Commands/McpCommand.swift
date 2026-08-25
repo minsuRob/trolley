@@ -25,8 +25,15 @@ struct McpCommand: ParsableCommand {
 
         // stdout is the JSON-RPC channel; anything else printed there corrupts
         // the protocol stream. Widget diagnostics go to stderr like everything else.
-        let widgetMode = widget && CGSessionCopyCurrentDictionary() != nil
-        if widget && !widgetMode {
+        // The app owns one long-lived widget; a server that drew its own would
+        // stack a second pet on screen and take it away again when the client
+        // hangs up. Report across instead -- and stay headless, which also means
+        // `claude mcp list` health checks no longer make a pet blink in and out.
+        let hostRunning = WidgetHost.isRunning()
+        let widgetMode = widget && !hostRunning && CGSessionCopyCurrentDictionary() != nil
+        if widget && hostRunning {
+            log("widget: trolley.app 이 이미 띄워두고 있어 활동만 전달합니다")
+        } else if widget && !widgetMode {
             log("widget disabled: no window server session")
         }
 
@@ -35,7 +42,10 @@ struct McpCommand: ParsableCommand {
             // main thread, whose run loop AppLauncher.pumpRunLoop turns while
             // polling launches.
             log("trolley mcp: ready on stdio")
-            MCPServer(provider: makeTools(launcher: AppLauncher())).run()
+            MCPServer(
+                provider: makeTools(launcher: AppLauncher()),
+                observer: hostRunning ? ActivityBridge.forwardingObserver : ToolCallObserver()
+            ).run()
             return
         }
 
