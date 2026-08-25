@@ -52,9 +52,17 @@ public final class StatusWidgetController {
     private var badgeTimer: DispatchWorkItem?
     private let sessionStartedAt = Date()
     private let permissions: () -> (ax: Bool, screenRecording: Bool)
+    private let onQuit: () -> Void
 
-    public init(permissions: @escaping () -> (ax: Bool, screenRecording: Bool)) {
+    /// - Parameter onQuit: what "위젯 종료" does. Injected so this module never
+    ///   decides how the process dies -- `trolley mcp` exits the same way it does
+    ///   on stdin EOF.
+    public init(
+        permissions: @escaping () -> (ax: Bool, screenRecording: Bool),
+        onQuit: @escaping () -> Void = { NSApplication.shared.terminate(nil) }
+    ) {
         self.permissions = permissions
+        self.onQuit = onQuit
 
         let size = Self.widgetSize
         panel = WidgetPanel(
@@ -85,6 +93,15 @@ public final class StatusWidgetController {
             object: panel,
             queue: .main
         ) { [weak self] _ in self?.persistOrigin() }
+
+        // Unplugging a display can leave the widget parked on coordinates no
+        // screen covers any more. Nothing else can bring it back -- there is no
+        // Dock icon and no menu bar item -- so re-assert it here.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in self?.reassertVisibility() }
     }
 
     /// The bridge handed to `MCPServer`. Fires on the MCP thread.
@@ -220,17 +237,30 @@ public final class StatusWidgetController {
         )
     }
 
+    /// Quitting is the only way to make the widget go away. Hiding used to live
+    /// here and was a trap: it left the server running with no UI surface at all,
+    /// so the process could only be found with `ps`.
     private func showMenu(for event: NSEvent) {
         let menu = NSMenu()
-        let hide = NSMenuItem(title: "위젯 숨기기", action: #selector(hideWidget), keyEquivalent: "")
-        hide.target = self
-        menu.addItem(hide)
+
+        // Names the process the quit item kills, and gives the PID to anyone who
+        // would rather reach for `kill`.
+        let info = NSMenuItem(title: "trolley mcp — PID \(getpid())", action: nil, keyEquivalent: "")
+        info.isEnabled = false
+        menu.addItem(info)
+        menu.addItem(.separator())
+
+        let quit = NSMenuItem(title: "위젯 종료", action: #selector(quitWidget), keyEquivalent: "")
+        quit.target = self
+        menu.addItem(quit)
+
         NSMenu.popUpContextMenu(menu, with: event, for: iconView)
     }
 
-    @objc private func hideWidget() {
+    @objc private func quitWidget() {
         activityPanel.hide()
         panel.orderOut(nil)
+        onQuit()
     }
 
     // MARK: - Position persistence
@@ -244,11 +274,27 @@ public final class StatusWidgetController {
         if let stored = UserDefaults.standard.array(forKey: Self.originDefaultsKey) as? [Double],
            stored.count == 2 {
             let candidate = NSPoint(x: stored[0], y: stored[1])
-            let frame = NSRect(origin: candidate, size: panel.frame.size)
-            if NSScreen.screens.contains(where: { $0.visibleFrame.intersects(frame) }) {
+            if isOnVisibleScreen(NSRect(origin: candidate, size: panel.frame.size)) {
                 return candidate
             }
         }
+        return defaultOrigin()
+    }
+
+    /// Pulls the widget back onto a screen that still exists and re-orders it to
+    /// the front. Cheap enough to run on every screen-parameter change.
+    private func reassertVisibility() {
+        if !isOnVisibleScreen(panel.frame) {
+            panel.setFrameOrigin(defaultOrigin())
+        }
+        panel.orderFrontRegardless()
+    }
+
+    private func isOnVisibleScreen(_ frame: NSRect) -> Bool {
+        NSScreen.screens.contains { $0.visibleFrame.intersects(frame) }
+    }
+
+    private func defaultOrigin() -> NSPoint {
         guard let screen = NSScreen.main else { return NSPoint(x: 100, y: 100) }
         let visible = screen.visibleFrame
         return NSPoint(

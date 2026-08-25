@@ -18,6 +18,11 @@ struct McpCommand: ParsableCommand {
     var widget = true
 
     func run() throws {
+        // Captured before anything else: once the client dies we are reparented
+        // to launchd, and this is what tells that apart from having been started
+        // by launchd in the first place.
+        startOrphanWatch(OrphanWatch(initialParentPID: getppid()))
+
         // stdout is the JSON-RPC channel; anything else printed there corrupts
         // the protocol stream. Widget diagnostics go to stderr like everything else.
         let widgetMode = widget && CGSessionCopyCurrentDictionary() != nil
@@ -39,9 +44,15 @@ struct McpCommand: ParsableCommand {
         // sourceless background run loop returns immediately (a 15s busy-spin),
         // while the NSRunningApplication KVO it exists for is now refreshed by
         // NSApp's own main run loop. A plain sleep is exactly right here.
-        let controller = StatusWidgetController(permissions: {
-            (SystemTrustChecker().isProcessTrusted(), CGPreflightScreenCaptureAccess())
-        })
+        let controller = StatusWidgetController(
+            permissions: {
+                (SystemTrustChecker().isProcessTrusted(), CGPreflightScreenCaptureAccess())
+            },
+            onQuit: {
+                log("trolley mcp: quitting (widget menu)")
+                Darwin.exit(0)
+            }
+        )
         let tools = makeTools(
             launcher: AppLauncher(sleeper: { Thread.sleep(forTimeInterval: $0) })
         )
@@ -67,6 +78,28 @@ struct McpCommand: ParsableCommand {
 
     private func log(_ line: String) {
         FileHandle.standardError.write(Data((line + "\n").utf8))
+    }
+
+    /// Backstop for the shutdown path we cannot rely on. Exit is normally stdin
+    /// EOF, but a client that dies while something else still holds the pipe's
+    /// write end never delivers one -- `readLine()` blocks forever and, in widget
+    /// mode, `app.run()` keeps the process alive with no way to reach it.
+    ///
+    /// Polling on a plain thread rather than a `Timer` so the same code serves
+    /// both modes: headless has no free run loop, its main thread being parked in
+    /// `readLine()`.
+    private func startOrphanWatch(_ watch: OrphanWatch, interval: TimeInterval = 5) {
+        let thread = Thread {
+            while true {
+                Thread.sleep(forTimeInterval: interval)
+                if watch.isOrphaned(currentParentPID: getppid()) {
+                    log("trolley mcp: client is gone (reparented to launchd), exiting")
+                    Darwin.exit(0)
+                }
+            }
+        }
+        thread.name = "orphan-watch"
+        thread.start()
     }
 
     private func makeTools(launcher: AppLauncher) -> TrolleyTools {
