@@ -4,9 +4,9 @@ import TrolleyKit
 
 /// Replaces this binary with the newest signed release.
 ///
-/// Works without a password because the installer hands `/usr/local/trolley` to
-/// the installing user: the swap needs write access to the *directory*, not to
-/// the file.
+/// Works without a password: dragged to /Applications, the bundle sits in a
+/// directory the admin group can write, and the swap needs write access to the
+/// *directory* rather than to what it replaces.
 struct UpdateCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "update",
@@ -21,7 +21,8 @@ struct UpdateCommand: ParsableCommand {
             throw ValidationError("현재 버전을 해석할 수 없습니다: \(TrolleyVersion.current)")
         }
         let path = AccessibilityPermission.currentExecutablePath()
-        print("설치 위치: \(path)")
+        let layout = InstallLayout.detect(executablePath: path)
+        print("설치 위치: \(layout.target.path)")
         print("현재 버전: \(current)")
 
         let installer = LiveUpdateIO.live
@@ -45,7 +46,7 @@ struct UpdateCommand: ParsableCommand {
             feed: TrolleyVersion.releaseFeed,
             assetName: TrolleyVersion.updateAssetName,
             current: current,
-            installedAt: URL(fileURLWithPath: path)
+            layout: layout
         )
 
         guard let installed else {

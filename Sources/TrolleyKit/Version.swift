@@ -14,9 +14,15 @@ public enum TrolleyVersion {
         string: "https://api.github.com/repos/minsuRob/trolley/releases/latest"
     )!
 
-    /// Stable asset name carried by every release -- the signed universal binary.
-    /// Stable on purpose: the updater looks it up by name, not by guessing.
-    public static let updateAssetName = "trolley-universal"
+    /// Stable asset name carried by every release -- the signed app bundle,
+    /// zipped. Stable on purpose: the updater looks it up by name rather than
+    /// guessing.
+    ///
+    /// A whole bundle rather than a bare executable because swapping only
+    /// `Contents/MacOS/trolley` breaks the signature: the executable's code
+    /// directory hashes `Info.plist`, so a binary signed outside the bundle
+    /// never matches the bundle it lands in.
+    public static let updateAssetName = "trolley-app.zip"
 
     /// GitHub rejects API requests without one.
     public static var userAgent: String { "trolley/\(current)" }

@@ -132,7 +132,7 @@ final class UpdateInstallerTests: XCTestCase {
                 feed: feed,
                 assetName: "trolley-universal",
                 current: SemanticVersion("0.1.0")!,
-                installedAt: try temporaryDestination()
+                layout: .bareBinary(try temporaryDestination())
             )
         )
         XCTAssertFalse(replaced, "서명 검증에 실패하면 절대 교체하면 안 된다")
@@ -153,7 +153,7 @@ final class UpdateInstallerTests: XCTestCase {
             feed: feed,
             assetName: "trolley-universal",
             current: SemanticVersion("0.1.0")!,
-            installedAt: try temporaryDestination()
+            layout: .bareBinary(try temporaryDestination())
         )
 
         XCTAssertNil(result)
@@ -179,7 +179,7 @@ final class UpdateInstallerTests: XCTestCase {
             feed: feed,
             assetName: "trolley-universal",
             current: SemanticVersion("0.1.0")!,
-            installedAt: destination
+            layout: .bareBinary(destination)
         )
 
         XCTAssertEqual(installed, SemanticVersion("0.2.0")!)
@@ -203,9 +203,43 @@ final class UpdateInstallerTests: XCTestCase {
                 feed: feed,
                 assetName: "trolley-universal",
                 current: SemanticVersion("0.1.0")!,
-                installedAt: URL(fileURLWithPath: "/usr/bin/trolley")
+                layout: .bareBinary(URL(fileURLWithPath: "/usr/bin/trolley"))
             )
         )
         XCTAssertFalse(downloaded, "쓸 수 없는 곳이면 받기 전에 멈춰야 한다")
+    }
+}
+
+final class InstallLayoutTests: XCTestCase {
+    /// Dragged to /Applications: an update has to replace the whole bundle,
+    /// because a binary signed outside it will not match its Info.plist hash.
+    func testAppBundleIsDetectedFromItsExecutable() {
+        let layout = InstallLayout.detect(
+            executablePath: "/Applications/trolley.app/Contents/MacOS/trolley"
+        )
+
+        XCTAssertEqual(layout, .appBundle(URL(fileURLWithPath: "/Applications/trolley.app")))
+        XCTAssertEqual(layout.target.lastPathComponent, "trolley.app")
+    }
+
+    func testPlainPathIsABareBinary() {
+        let layout = InstallLayout.detect(executablePath: "/usr/local/bin/trolley")
+
+        XCTAssertEqual(layout, .bareBinary(URL(fileURLWithPath: "/usr/local/bin/trolley")))
+    }
+
+    /// A development build lives three directories deep too -- .build/.../trolley --
+    /// so depth alone must not be mistaken for a bundle.
+    func testDeepNonBundlePathIsNotABundle() {
+        let layout = InstallLayout.detect(executablePath: "/repo/.build/release/trolley")
+
+        XCTAssertEqual(layout, .bareBinary(URL(fileURLWithPath: "/repo/.build/release/trolley")))
+    }
+
+    /// MacOS/ without the .app above it is somebody else's directory layout.
+    func testMacOSDirectoryOutsideABundleIsNotABundle() {
+        let layout = InstallLayout.detect(executablePath: "/opt/tools/Contents/MacOS/trolley")
+
+        XCTAssertEqual(layout, .bareBinary(URL(fileURLWithPath: "/opt/tools/Contents/MacOS/trolley")))
     }
 }
