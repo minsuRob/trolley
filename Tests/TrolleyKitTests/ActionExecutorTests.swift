@@ -84,4 +84,26 @@ final class ActionExecutorTests: XCTestCase {
 
         XCTAssertEqual(poster.postedKeys.map(\.0), [36, 36])
     }
+
+    func testUnknownKeyNameReportsFailureInsteadOfSilentSuccess() {
+        let poster = RecordingKeyPoster()
+        let executor = ActionExecutor(root: MockAXElement(), keyPoster: poster)
+
+        let result = executor.perform(.key(name: "f13", modifiers: []))
+
+        XCTAssertTrue(poster.postedKeys.isEmpty)
+        if case .failed = result {} else { XCTFail("expected .failed for an unmapped key name") }
+    }
+
+    /// Posting the bare key would perform a different action than asked for --
+    /// "a" instead of "cmd+a" -- so this must fail rather than degrade.
+    func testUnknownModifierFailsRatherThanPostingAnUnmodifiedKey() {
+        let poster = RecordingKeyPoster()
+        let executor = ActionExecutor(root: MockAXElement(), keyPoster: poster)
+
+        let result = executor.perform(.key(name: "return", modifiers: ["hyper"]))
+
+        XCTAssertTrue(poster.postedKeys.isEmpty)
+        if case .failed = result {} else { XCTFail("expected .failed for an unmapped modifier") }
+    }
 }

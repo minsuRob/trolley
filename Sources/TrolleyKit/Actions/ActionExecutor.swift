@@ -54,7 +54,11 @@ public struct ActionExecutor {
             return perform(.click(element))
 
         case .key(let name, let modifiers):
-            KeyboardActions.press(name, modifiers: modifiers, using: keyPoster)
+            // An unrecognized key/modifier name used to post nothing and still
+            // report success; report the no-op instead.
+            guard KeyboardActions.press(name, modifiers: modifiers, using: keyPoster) else {
+                return .failed("unknown key or modifier name in \((modifiers + [name]).joined(separator: "+"))")
+            }
             return .ok
 
         case .type(let text):
