@@ -151,15 +151,32 @@ public struct MCPServer {
         }
     }
 
+    /// A tool that needs to attach non-text content blocks (an image, say) puts
+    /// them under this key in its returned object. `toolContent` strips the key
+    /// and appends the blocks after the text block -- keeping the raw base64
+    /// out of the pretty-printed payload the model reads as text.
+    public static let extraContentKey = "_extraContent"
+
     /// Tool payloads travel as a JSON document inside a text content block --
     /// that is what MCP's content model allows, and it keeps the result readable
-    /// to the model.
+    /// to the model. Extra content blocks (see `extraContentKey`) ride after it.
     static func toolContent(_ value: JSONValue, isError: Bool) -> JSONValue {
-        let text = (try? value.prettyPrinted()) ?? "{\"error\":{\"code\":\"ACTION_FAILED\",\"message\":\"result was not encodable\"}}"
+        var payload = value
+        var extraBlocks: [JSONValue] = []
+        if case .object(var object) = value,
+           let extras = object[extraContentKey]?.arrayValue {
+            extraBlocks = extras
+            object.removeValue(forKey: extraContentKey)
+            payload = .object(object)
+        }
+
+        let text = (try? payload.prettyPrinted()) ?? "{\"error\":{\"code\":\"ACTION_FAILED\",\"message\":\"result was not encodable\"}}"
+        var content: [JSONValue] = [
+            .object(["type": .string("text"), "text": .string(text)])
+        ]
+        content.append(contentsOf: extraBlocks)
         return .object([
-            "content": .array([
-                .object(["type": .string("text"), "text": .string(text)])
-            ]),
+            "content": .array(content),
             "isError": .bool(isError)
         ])
     }

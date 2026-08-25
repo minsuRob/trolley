@@ -122,6 +122,6 @@ enum RunHelpers {
     }
 
     static func postMouseClick(at point: CGPoint) {
-        MouseSynthesizer.click(at: point)
+        MouseAnimator(poster: CGMouseEventPoster()).animatedClick(to: point)
     }
 }

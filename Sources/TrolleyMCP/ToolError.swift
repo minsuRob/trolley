@@ -12,6 +12,7 @@ public struct ToolError: Error, Equatable {
         case elementStale = "ELEMENT_STALE"
         case invalidElementID = "INVALID_ELEMENT_ID"
         case unknownKey = "UNKNOWN_KEY"
+        case screenRecordingDenied = "SCREEN_RECORDING_DENIED"
         case unsupportedText = "UNSUPPORTED_TEXT"
         case clipboardFailed = "CLIPBOARD_FAILED"
         case inputSourceFailed = "INPUT_SOURCE_FAILED"
@@ -67,7 +68,8 @@ public extension ToolError {
             "No element in \(bundleID) matches \"\(text)\".",
             hint: "Call snapshot to see what is actually exposed. Chromium/Electron web content "
                 + "often does not expose its inner tree at all -- if the app is one of those, the "
-                + "element may be unreachable via AX regardless of the query."
+                + "element may be unreachable via AX regardless of the query; use the screenshot "
+                + "tool and click_at on what you see instead."
         )
     }
 
@@ -89,6 +91,17 @@ public extension ToolError {
 
     static func missingArgument(_ name: String) -> ToolError {
         ToolError(.invalidArgument, "Missing required argument \"\(name)\".")
+    }
+
+    static func screenRecordingDenied(executablePath: String) -> ToolError {
+        ToolError(
+            .screenRecordingDenied,
+            "trolley does not have Screen Recording permission.",
+            hint: "Grant Screen Recording to this exact binary: \(executablePath). "
+                + "System Settings > Privacy & Security > Screen Recording. This permission is separate "
+                + "from Accessibility, and unlike it, only applies to processes launched after the grant "
+                + "-- restart trolley (reconnect the MCP server) once granted."
+        )
     }
 
     static func unsupportedText(_ characters: String) -> ToolError {

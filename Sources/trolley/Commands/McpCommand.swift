@@ -20,13 +20,14 @@ struct McpCommand: ParsableCommand {
             trustChecker: SystemTrustChecker(),
             locator: WorkspaceAppLocator(),
             makeKeyPoster: { targetPid in CGKeyboardSynthesizer(targetPid: targetPid) },
-            mouseClicker: { MouseSynthesizer.click(at: $0) },
+            mousePoster: CGMouseEventPoster(),
+            screenCapturer: SystemScreenCapturer(),
             makeRoot: { pid, policy in
                 SystemAXElement.application(pid: pid, childrenRetryPolicy: policy)
             },
             activateApp: { pid in
                 guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
-                return app.activate(options: [.activateIgnoringOtherApps])
+                return app.activate()
             },
             listRunningApps: {
                 NSWorkspace.shared.runningApplications

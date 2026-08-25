@@ -111,6 +111,54 @@ final class MCPServerTests: XCTestCase {
         XCTAssertTrue(exchange(["", "   "]).isEmpty)
     }
 
+    /// The reserved key lets a tool attach an image without the base64 landing
+    /// in the pretty-printed text the model reads.
+    func testExtraContentBlocksRideAfterTheTextBlockAndLeaveThePayload() throws {
+        let provider = StubToolProvider(handler: { _, _ in
+            .object([
+                "width": .int(4),
+                MCPServer.extraContentKey: .array([
+                    .object(["type": .string("image"), "data": .string("QUJD"), "mimeType": .string("image/jpeg")])
+                ])
+            ])
+        })
+        let responses = exchange([
+            #"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"echo"}}"#
+        ], provider: provider)
+
+        let content = try XCTUnwrap(responses[0]["result"]?["content"]?.arrayValue)
+        XCTAssertEqual(content.count, 2)
+        XCTAssertEqual(content[0]["type"]?.stringValue, "text", "text stays first -- clients and tests assume it")
+        XCTAssertEqual(content[1]["type"]?.stringValue, "image")
+        XCTAssertEqual(content[1]["data"]?.stringValue, "QUJD")
+
+        let text = try XCTUnwrap(content[0]["text"]?.stringValue)
+        XCTAssertFalse(text.contains("QUJD"), "the base64 must not leak into the text payload")
+        XCTAssertFalse(text.contains(MCPServer.extraContentKey))
+        XCTAssertTrue(text.contains("width"))
+    }
+
+    func testResponsesWithImageBlocksAreStillASingleLine() throws {
+        let provider = StubToolProvider(handler: { _, _ in
+            .object([
+                MCPServer.extraContentKey: .array([
+                    .object(["type": .string("image"), "data": .string(Data(repeating: 7, count: 900).base64EncodedString()), "mimeType": .string("image/jpeg")])
+                ])
+            ])
+        })
+        var pending = [#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"echo"}}"#]
+        var written: [String] = []
+        MCPServer(
+            provider: provider,
+            readLine: { pending.isEmpty ? nil : pending.removeFirst() },
+            writeLine: { written.append($0) },
+            logLine: { _ in }
+        ).run()
+
+        XCTAssertEqual(written.count, 1)
+        XCTAssertFalse(try XCTUnwrap(written.first).contains("\n"))
+    }
+
     /// The transport is newline-delimited, so an embedded newline would split
     /// one message into two unparseable halves.
     func testResponsesAreASingleLine() throws {

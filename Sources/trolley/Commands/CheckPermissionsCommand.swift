@@ -18,10 +18,23 @@ struct CheckPermissionsCommand: ParsableCommand {
         let trusted = AccessibilityPermission.ensureTrusted(checker: checker, prompt: prompt)
 
         if trusted {
-            print("status: trusted")
+            print("accessibility: trusted")
         } else {
-            print("status: NOT trusted")
+            print("accessibility: NOT trusted")
             print("Add the exact path above in System Settings → Privacy & Security → Accessibility, then re-run.")
+        }
+
+        // Screen Recording only gates the screenshot tool; AX-only workflows
+        // are fine without it, so missing it is reported but not fatal.
+        let capturer = SystemScreenCapturer()
+        if capturer.hasScreenRecordingAccess() {
+            print("screen recording: granted")
+        } else {
+            print("screen recording: NOT granted (only needed for the screenshot MCP tool)")
+            print("Add the same path in System Settings → Privacy & Security → Screen Recording, then restart trolley.")
+        }
+
+        if !trusted {
             throw ExitCode.failure
         }
     }

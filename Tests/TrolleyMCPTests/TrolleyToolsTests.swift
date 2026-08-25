@@ -9,7 +9,8 @@ final class TrolleyToolsTests: XCTestCase {
     private var poster = FakeKeyPoster()
     private var root = FakeElement(role: "AXApplication")
     private var slept: [TimeInterval] = []
-    private var mouseClicks: [CGPoint] = []
+    private var mouse = FakeMousePoster()
+    private var screen = FakeScreenCapturer()
     private var activatedPids: [pid_t] = []
     private var activateSucceeds = true
     private var keyPosterTargets: [pid_t?] = []
@@ -24,7 +25,8 @@ final class TrolleyToolsTests: XCTestCase {
                 self?.keyPosterTargets.append(targetPid)
                 return self?.poster ?? FakeKeyPoster()
             },
-            mouseClicker: { [weak self] point in self?.mouseClicks.append(point) },
+            mousePoster: mouse,
+            screenCapturer: screen,
             makeRoot: { [weak self] _, _ in self?.root ?? FakeElement() },
             activateApp: { [weak self] pid in
                 self?.activatedPids.append(pid)
@@ -48,7 +50,8 @@ final class TrolleyToolsTests: XCTestCase {
         poster = FakeKeyPoster()
         root = FakeElement(role: "AXApplication")
         slept = []
-        mouseClicks = []
+        mouse = FakeMousePoster()
+        screen = FakeScreenCapturer()
         activatedPids = []
         activateSucceeds = true
         keyPosterTargets = []
@@ -609,6 +612,130 @@ final class TrolleyToolsTests: XCTestCase {
             XCTAssertEqual(toolError?.code, .timeout)
             XCTAssertEqual(toolError?.hint?.contains("thorough"), true)
         }
+    }
+
+    // MARK: - Screenshot
+
+    func testScreenshotReturnsGeometryAndAnImageBlock() throws {
+        let result = try call("screenshot")
+
+        // Fake display: 4x2 points at scale 2.0, normalized to 1px = 1pt.
+        XCTAssertEqual(result["pixelWidth"]?.intValue, 4)
+        XCTAssertEqual(result["pixelHeight"]?.intValue, 2)
+        XCTAssertEqual(result["pointsPerPixel"]?.doubleValue, 1.0)
+        XCTAssertEqual(result["capturedRegion"]?["width"]?.doubleValue, 4)
+        XCTAssertEqual(result["format"]?.stringValue, "jpeg")
+
+        let blocks = try XCTUnwrap(result[MCPServer.extraContentKey]?.arrayValue)
+        XCTAssertEqual(blocks.first?["type"]?.stringValue, "image")
+        XCTAssertEqual(blocks.first?["mimeType"]?.stringValue, "image/jpeg")
+        let base64 = try XCTUnwrap(blocks.first?["data"]?.stringValue)
+        let data = try XCTUnwrap(Data(base64Encoded: base64))
+        XCTAssertEqual(Array(data.prefix(3)), [0xFF, 0xD8, 0xFF], "decodes to a real JPEG")
+    }
+
+    func testScreenshotWithoutPermissionExplainsAndRequests() {
+        screen.hasAccess = false
+
+        XCTAssertThrowsError(try call("screenshot")) { error in
+            let toolError = error as? ToolError
+            XCTAssertEqual(toolError?.code, .screenRecordingDenied)
+            XCTAssertEqual(toolError?.hint?.contains("restart"), true)
+        }
+        XCTAssertEqual(screen.requestCount, 1, "the request registers the binary in System Settings")
+    }
+
+    func testScreenshotRejectsAPartialRegion() {
+        XCTAssertThrowsError(try call("screenshot", ["x": .double(0), "y": .double(0)])) { error in
+            XCTAssertEqual((error as? ToolError)?.code, .invalidArgument)
+        }
+    }
+
+    func testScreenshotCropsTheRequestedRegion() throws {
+        let result = try call("screenshot", [
+            "x": .double(1), "y": .double(0), "width": .double(2), "height": .double(2)
+        ])
+
+        XCTAssertEqual(result["capturedRegion"]?["x"]?.doubleValue, 1)
+        XCTAssertEqual(result["capturedRegion"]?["width"]?.doubleValue, 2)
+        XCTAssertEqual(result["pixelWidth"]?.intValue, 2)
+    }
+
+    func testCheckPermissionsReportsBothPermissions() throws {
+        screen.hasAccess = false
+
+        let result = try call("check_permissions")
+
+        XCTAssertEqual(result["trusted"]?.boolValue, true)
+        XCTAssertEqual(result["screenRecording"]?.boolValue, false)
+        XCTAssertEqual(result["instructions"]?.stringValue?.contains("Screen Recording"), true)
+    }
+
+    // MARK: - Coordinate mouse tools
+
+    func testClickAtGlidesToTheTargetThenClicks() throws {
+        mouse.location = CGPoint(x: 10, y: 10)
+
+        let result = try call("click_at", ["x": .double(300), "y": .double(200)])
+
+        XCTAssertEqual(result["clicked"]?.boolValue, true)
+        XCTAssertEqual(result["movedFrom"]?["x"]?.doubleValue, 10)
+        XCTAssertEqual(result["movedTo"]?["x"]?.doubleValue, 300)
+        XCTAssertGreaterThan(result["durationMs"]?.intValue ?? 0, 0)
+        XCTAssertGreaterThan(mouse.moves.count, 2, "the cursor must glide, not teleport")
+        XCTAssertEqual(mouse.moves.last, CGPoint(x: 300, y: 200))
+        XCTAssertEqual(mouse.clicks, [CGPoint(x: 300, y: 200)])
+    }
+
+    func testMoveMouseDoesNotClick() throws {
+        _ = try call("move_mouse", ["x": .double(100), "y": .double(100)])
+
+        XCTAssertTrue(mouse.clicks.isEmpty)
+        XCTAssertEqual(mouse.moves.last, CGPoint(x: 100, y: 100))
+    }
+
+    func testClickAtRequiresBothCoordinates() {
+        XCTAssertThrowsError(try call("click_at", ["x": .double(100)])) { error in
+            XCTAssertEqual((error as? ToolError)?.code, .invalidArgument)
+        }
+        XCTAssertTrue(mouse.moves.isEmpty)
+    }
+
+    func testClickAtRequiresTrust() {
+        trust.trusted = false
+
+        XCTAssertThrowsError(try call("click_at", ["x": .double(1), "y": .double(1)])) { error in
+            XCTAssertEqual((error as? ToolError)?.code, .notTrusted)
+        }
+    }
+
+    /// The AXPress-fallback click goes through the same animator, so it glides
+    /// exactly like an explicit click_at.
+    func testAXPressFallbackClickAlsoAnimates() throws {
+        let button = FakeElement(role: "AXButton", title: "OK")
+        button.pressResult = false
+        button.attributes[AXAttr.position] = axPoint(CGPoint(x: 400, y: 300))
+        button.attributes[AXAttr.size] = axSize(CGSize(width: 100, height: 40))
+        root.fakeChildren = [button]
+        let tools = makeTools()
+        let id = try idOfFirstMatch(tools, text: "OK")
+
+        let result = try tools.call(name: "click", arguments: .object(["elementId": .string(id)]))
+
+        XCTAssertEqual(result["method"]?.stringValue, "mouseFallback")
+        XCTAssertEqual(mouse.clicks, [CGPoint(x: 450, y: 320)], "clicks the element's centre")
+        XCTAssertGreaterThan(mouse.moves.count, 2, "the fallback click must glide too")
+        XCTAssertEqual(mouse.moves.last, CGPoint(x: 450, y: 320))
+    }
+
+    private func axPoint(_ point: CGPoint) -> AnyObject {
+        var value = point
+        return AXValueCreate(.cgPoint, &value)!
+    }
+
+    private func axSize(_ size: CGSize) -> AnyObject {
+        var value = size
+        return AXValueCreate(.cgSize, &value)!
     }
 
     // MARK: - Dispatch

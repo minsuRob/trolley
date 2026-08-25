@@ -26,7 +26,11 @@ public final class TrolleyTools: ToolProviding {
     /// Built per call, because delivering keystrokes to a specific pid is what
     /// gets them past an active input method.
     private let makeKeyPoster: (pid_t?) -> KeyEventPosting
-    private let mouseClicker: ((CGPoint) -> Void)?
+    /// One seam serves every mouse action: the coordinate tools drive the
+    /// animator directly, and the AXPress-fallback closure is derived from it,
+    /// so the fallback click glides exactly like an explicit click_at.
+    private let mousePoster: MouseEventPosting?
+    private let screenCapturer: ScreenCapturing?
     private let makeRoot: (pid_t, AXChildrenRetryPolicy) -> AXElementProviding
     private let listRunningApps: () -> [AppSummary]
     /// Synthesized keystrokes go to the frontmost app, not to whatever AX
@@ -40,6 +44,19 @@ public final class TrolleyTools: ToolProviding {
     private let now: () -> Date
 
     private let registry = ElementRegistry()
+
+    /// Animated cursor movement built over `mousePoster`; nil when no poster
+    /// was injected (headless test configurations).
+    private var animator: MouseAnimator? {
+        mousePoster.map { MouseAnimator(poster: $0, sleeper: sleeper) }
+    }
+
+    /// The AXPress-fallback click, in the `(CGPoint) -> Void` shape
+    /// `ActionExecutor` expects -- animated, so a fallback click glides the
+    /// same way an explicit click_at does.
+    private var mouseClicker: ((CGPoint) -> Void)? {
+        animator.map { animator in { animator.animatedClick(to: $0) } }
+    }
     /// AXManualAccessibility is a one-shot, asynchronous signal; re-sending it
     /// (and re-paying the settle delay) on every call would make each snapshot
     /// needlessly slow.
@@ -50,7 +67,8 @@ public final class TrolleyTools: ToolProviding {
         locator: RunningAppLocating,
         launcher: AppLauncher = AppLauncher(),
         makeKeyPoster: @escaping (pid_t?) -> KeyEventPosting,
-        mouseClicker: ((CGPoint) -> Void)? = nil,
+        mousePoster: MouseEventPosting? = nil,
+        screenCapturer: ScreenCapturing? = nil,
         makeRoot: @escaping (pid_t, AXChildrenRetryPolicy) -> AXElementProviding,
         activateApp: @escaping (pid_t) -> Bool,
         listRunningApps: @escaping () -> [AppSummary],
@@ -64,7 +82,8 @@ public final class TrolleyTools: ToolProviding {
         self.locator = locator
         self.launcher = launcher
         self.makeKeyPoster = makeKeyPoster
-        self.mouseClicker = mouseClicker
+        self.mousePoster = mousePoster
+        self.screenCapturer = screenCapturer
         self.makeRoot = makeRoot
         self.listRunningApps = listRunningApps
         self.activateApp = activateApp
@@ -226,6 +245,48 @@ public final class TrolleyTools: ToolProviding {
                     "maxDepth": Schema.integer("Maximum tree depth to search.", default: 25),
                     "thorough": Schema.boolean("Slow, Chromium-tolerant traversal.", default: false)
                 ], required: ["bundleId"])
+            ),
+            ToolDefinition(
+                name: "screenshot",
+                description: "Capture the main display (or a region of it) as a JPEG image. Use this when "
+                    + "snapshot/find_elements return nothing useful -- typical for Chromium/Electron web "
+                    + "content -- then click what you see with click_at. Coordinates: the accompanying JSON "
+                    + "reports capturedRegion (global screen points) and pointsPerPixel. To click a feature "
+                    + "you see at image pixel (px, py): screenX = capturedRegion.x + px * pointsPerPixel; "
+                    + "screenY = capturedRegion.y + py * pointsPerPixel; then call click_at with that. By "
+                    + "default pointsPerPixel is 1.0, so image pixels map 1:1 to screen points. Requires "
+                    + "Screen Recording permission (separate from Accessibility).",
+                inputSchema: Schema.object([
+                    "x": Schema.number("Region origin x in global screen points. Give all four region values or none."),
+                    "y": Schema.number("Region origin y in global screen points."),
+                    "width": Schema.number("Region width in points."),
+                    "height": Schema.number("Region height in points."),
+                    "maxWidth": Schema.integer(
+                        "Cap the output image width in pixels; the image scales down to fit and "
+                        + "pointsPerPixel rises accordingly.",
+                        default: 1440
+                    )
+                ])
+            ),
+            ToolDefinition(
+                name: "click_at",
+                description: "Move the mouse smoothly to a global screen point and left-click. For "
+                    + "coordinates derived from a screenshot, apply the formula from the screenshot tool "
+                    + "description first. Prefer the click tool when an AX element id is available -- it is "
+                    + "faster and survives window moves.",
+                inputSchema: Schema.object([
+                    "x": Schema.number("Global screen x in points (top-left origin)."),
+                    "y": Schema.number("Global screen y in points.")
+                ], required: ["x", "y"])
+            ),
+            ToolDefinition(
+                name: "move_mouse",
+                description: "Move the mouse smoothly to a global screen point without clicking -- useful "
+                    + "for hover states or positioning before a manual step.",
+                inputSchema: Schema.object([
+                    "x": Schema.number("Global screen x in points (top-left origin)."),
+                    "y": Schema.number("Global screen y in points.")
+                ], required: ["x", "y"])
             )
         ]
     }
@@ -246,6 +307,9 @@ public final class TrolleyTools: ToolProviding {
         case "press_key": return try pressKey(args)
         case "set_ax_value": return try setAXValue(args)
         case "wait_for_element": return try waitForElement(args)
+        case "screenshot": return try screenshot(args)
+        case "click_at": return try clickAt(args)
+        case "move_mouse": return try moveMouse(args)
         default:
             throw ToolError(.invalidArgument, "Unknown tool \"\(name)\".")
         }
@@ -255,17 +319,133 @@ public final class TrolleyTools: ToolProviding {
 
     private func checkPermissions() -> JSONValue {
         let trusted = trustChecker.isProcessTrusted()
+        let screenRecording = screenCapturer?.hasScreenRecordingAccess()
         var result: [String: JSONValue] = [
             "trusted": .bool(trusted),
             "executablePath": .string(executablePath())
         ]
+        if let screenRecording {
+            result["screenRecording"] = .bool(screenRecording)
+        }
+        var instructions: [String] = []
         if !trusted {
-            result["instructions"] = .string(
+            instructions.append(
                 "Open System Settings > Privacy & Security > Accessibility and add the binary at the path "
                 + "above. Trust is per executable path, so a rebuilt or moved binary needs re-approving."
             )
         }
+        if screenRecording == false {
+            instructions.append(
+                "The screenshot tool additionally needs Screen Recording (System Settings > Privacy & "
+                + "Security > Screen Recording) for the same binary, and trolley must be restarted after "
+                + "the grant. AX-only tools work without it."
+            )
+        }
+        if !instructions.isEmpty {
+            result["instructions"] = .string(instructions.joined(separator: " "))
+        }
         return .object(result)
+    }
+
+    private func screenshot(_ args: Arguments) throws -> JSONValue {
+        guard let screenCapturer else {
+            throw ToolError(.actionFailed, "screen capture is unavailable in this configuration")
+        }
+        guard screenCapturer.hasScreenRecordingAccess() else {
+            // Registers the binary with TCC so it appears in System Settings.
+            screenCapturer.requestScreenRecordingAccess()
+            throw ToolError.screenRecordingDenied(executablePath: executablePath())
+        }
+
+        let region = try regionArgument(args)
+        let capture: ScreenCapture
+        let rendered: RenderedScreenshot
+        do {
+            capture = try screenCapturer.captureMainDisplay()
+            rendered = try ScreenshotRenderer.render(
+                capture,
+                region: region,
+                maxWidth: max(64, args.int("maxWidth", default: 1440))
+            )
+        } catch let error as ScreenshotRenderError {
+            if case .emptyRegion = error {
+                throw ToolError(.invalidArgument, "\(error)")
+            }
+            throw ToolError(.actionFailed, "\(error)")
+        } catch let error as ScreenCaptureError {
+            if case .accessDenied = error {
+                throw ToolError.screenRecordingDenied(executablePath: executablePath())
+            }
+            throw ToolError(.actionFailed, "\(error)")
+        }
+
+        func rect(_ r: CGRect) -> JSONValue {
+            .object([
+                "x": .double(Double(r.minX)), "y": .double(Double(r.minY)),
+                "width": .double(Double(r.width)), "height": .double(Double(r.height))
+            ])
+        }
+        return .object([
+            "pixelWidth": .int(rendered.pixelWidth),
+            "pixelHeight": .int(rendered.pixelHeight),
+            "pointsPerPixel": .double((rendered.pointsPerPixel * 1000).rounded() / 1000),
+            "capturedRegion": rect(rendered.capturedRegion),
+            "displayBounds": rect(capture.displayBounds),
+            "format": .string("jpeg"),
+            MCPServer.extraContentKey: .array([
+                .object([
+                    "type": .string("image"),
+                    "data": .string(rendered.jpegData.base64EncodedString()),
+                    "mimeType": .string("image/jpeg")
+                ])
+            ])
+        ])
+    }
+
+    /// All four region values or none; a partial region is a coordinate bug on
+    /// the caller's side, not something to guess about.
+    private func regionArgument(_ args: Arguments) throws -> CGRect? {
+        let values = ["x", "y", "width", "height"].map { args.raw[$0]?.doubleValue }
+        let present = values.compactMap { $0 }
+        guard !present.isEmpty else { return nil }
+        guard present.count == 4 else {
+            throw ToolError(
+                .invalidArgument,
+                "Give all four of x, y, width, height (in screen points), or none for the full display."
+            )
+        }
+        return CGRect(x: present[0], y: present[1], width: present[2], height: present[3])
+    }
+
+    private func clickAt(_ args: Arguments) throws -> JSONValue {
+        var payload = try animatedMove(args)
+        payload["clicked"] = .bool(true)
+        return .object(payload)
+    }
+
+    private func moveMouse(_ args: Arguments) throws -> JSONValue {
+        .object(try animatedMove(args, clicking: false))
+    }
+
+    private func animatedMove(_ args: Arguments, clicking: Bool = true) throws -> [String: JSONValue] {
+        try requireTrust()
+        guard let animator else {
+            throw ToolError(.actionFailed, "mouse control is unavailable in this configuration")
+        }
+        guard let x = args.raw["x"]?.doubleValue, let y = args.raw["y"]?.doubleValue else {
+            throw ToolError(.invalidArgument, "Both x and y are required, in global screen points.")
+        }
+
+        let target = CGPoint(x: x, y: y)
+        let report = clicking ? animator.animatedClick(to: target) : animator.animatedMove(to: target)
+        func point(_ p: CGPoint) -> JSONValue {
+            .object(["x": .double(Double(p.x)), "y": .double(Double(p.y))])
+        }
+        return [
+            "movedFrom": point(report.from),
+            "movedTo": point(report.to),
+            "durationMs": .int(Int(report.duration * 1000))
+        ]
     }
 
     private func listApps(_ args: Arguments) -> JSONValue {
@@ -343,10 +523,15 @@ public final class TrolleyTools: ToolProviding {
                 + "or lower maxDepth, rather than assuming a missing element is absent."
             )
         }
-        if result.nodeCount <= 1 && !thorough {
+        if result.nodeCount <= 1 {
             payload["emptyTreeHint"] = .string(
-                "The app exposed essentially nothing. If it is Chromium- or Electron-based, retry with "
-                + "thorough=true, which forces the lazy tree to populate."
+                thorough
+                    ? "The app exposed essentially nothing even with thorough=true -- its content is not "
+                        + "reachable via accessibility. Switch to the screenshot tool and click what you "
+                        + "see with click_at."
+                    : "The app exposed essentially nothing. If it is Chromium- or Electron-based, retry "
+                        + "with thorough=true; if that also comes back empty, use the screenshot tool and "
+                        + "click_at instead."
             )
         }
         return .object(payload)

@@ -95,6 +95,58 @@ final class FakeKeyPoster: KeyEventPosting {
     }
 }
 
+final class FakeMousePoster: MouseEventPosting {
+    var location = CGPoint(x: 0, y: 0)
+    var moves: [CGPoint] = []
+    var clicks: [CGPoint] = []
+
+    func currentLocation() -> CGPoint { location }
+
+    func move(to point: CGPoint) {
+        moves.append(point)
+        location = point
+    }
+
+    func click(at point: CGPoint) {
+        clicks.append(point)
+    }
+}
+
+final class FakeScreenCapturer: ScreenCapturing {
+    var hasAccess = true
+    var requestCount = 0
+
+    func hasScreenRecordingAccess() -> Bool { hasAccess }
+
+    func requestScreenRecordingAccess() -> Bool {
+        requestCount += 1
+        return hasAccess
+    }
+
+    /// A tiny synthetic 8x4-pixel capture of a 4x2-point display (scale 2.0),
+    /// so renderer output sizes are exactly predictable.
+    func captureMainDisplay() throws -> ScreenCapture {
+        guard hasAccess else { throw ScreenCaptureError.accessDenied }
+        return ScreenCapture(
+            image: Self.makeImage(width: 8, height: 4),
+            displayBounds: CGRect(x: 0, y: 0, width: 4, height: 2),
+            pixelsPerPoint: 2.0
+        )
+    }
+
+    static func makeImage(width: Int, height: Int) -> CGImage {
+        let context = CGContext(
+            data: nil, width: width, height: height,
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )!
+        context.setFillColor(CGColor(red: 0, green: 0.5, blue: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage()!
+    }
+}
+
 final class FakeClipboard: ClipboardAccessing {
     enum Event: Equatable {
         case snapshot
