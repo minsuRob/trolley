@@ -144,9 +144,31 @@ public final class StatusWidgetController {
     }
 
     public func show() {
+        installEditMenu()
         panel.setFrameOrigin(restoredOrigin())
         panel.orderFrontRegardless()
         render(.idle)
+    }
+
+    /// An accessory app shows no menu bar, but the main menu is still what
+    /// routes ⌘X/⌘C/⌘V/⌘A to the first responder. Without one, the prompt box
+    /// silently refuses every paste -- which is how most people put a long
+    /// prompt, or any Korean text an IME already committed elsewhere, into it.
+    private func installEditMenu() {
+        guard NSApp.mainMenu == nil else { return }
+        let edit = NSMenu(title: "Edit")
+        for (title, selector, key) in [
+            ("Undo", "undo:", "z"), ("Redo", "redo:", "Z"),
+            ("Cut", "cut:", "x"), ("Copy", "copy:", "c"),
+            ("Paste", "paste:", "v"), ("Select All", "selectAll:", "a")
+        ] {
+            edit.addItem(withTitle: title, action: Selector((selector)), keyEquivalent: key)
+        }
+        let editItem = NSMenuItem()
+        editItem.submenu = edit
+        let main = NSMenu()
+        main.addItem(editItem)
+        NSApp.mainMenu = main
     }
 
     // MARK: - State
