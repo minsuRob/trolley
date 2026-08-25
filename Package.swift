@@ -20,11 +20,17 @@ let package = Package(
             dependencies: ["TrolleyKit"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        .target(
+            name: "TrolleyWidget",
+            dependencies: ["TrolleyMCP"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
         .executableTarget(
             name: "trolley",
             dependencies: [
                 "TrolleyKit",
                 "TrolleyMCP",
+                "TrolleyWidget",
                 .product(name: "ArgumentParser", package: "swift-argument-parser")
             ],
             swiftSettings: [.swiftLanguageMode(.v5)]
@@ -37,6 +43,11 @@ let package = Package(
         .testTarget(
             name: "TrolleyMCPTests",
             dependencies: ["TrolleyMCP", "TrolleyKit"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .testTarget(
+            name: "TrolleyWidgetTests",
+            dependencies: ["TrolleyWidget"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         )
     ]
