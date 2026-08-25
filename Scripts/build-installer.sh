@@ -105,7 +105,60 @@ cp "$BINARY" "$DIST/trolley-universal"
 rm -f "$DIST/trolley-component.pkg"
 rm -rf "$STAGE"
 
-# --- 6. Sign and notarize the package ------------------------------------------
+# --- 6. Installer app in a signed, notarized disk image -------------------------
+# The distributable artifact, because a .pkg cannot be signed without a Developer
+# ID *Installer* certificate and macOS refuses to open unsigned ones -- measured:
+# both a bare unsigned pkg and one nested inside a signed dmg come back Invalid
+# from notarytool, and productsign rejects the Application identity outright.
+# An app bundle signs with the certificate we do have.
+echo "==> 설치 앱 빌드"
+DMGROOT="$DIST/dmgroot"
+APP="$DMGROOT/trolley 설치.app"
+rm -rf "$DMGROOT"
+mkdir -p "$DMGROOT"
+osacompile -o "$APP" Scripts/dmg/installer.applescript
+install -m 755 "$BINARY" "$APP/Contents/Resources/trolley"
+# Inside out: the outer signature covers the inner one.
+codesign --force --options runtime --timestamp \
+    --keychain "$TROLLEY_KEYCHAIN" --sign "$TROLLEY_SIGN_ID" "$APP/Contents/Resources/trolley"
+codesign --force --options runtime --timestamp \
+    --keychain "$TROLLEY_KEYCHAIN" --sign "$TROLLEY_SIGN_ID" "$APP"
+codesign --verify --strict --deep --verbose=2 "$APP"
+
+echo "==> dmg 생성"
+DMG="$DIST/trolley-$VERSION.dmg"
+rm -f "$DMG"
+hdiutil create -volname "trolley $VERSION" -srcfolder "$DMGROOT" -ov -format UDZO "$DMG" >/dev/null
+codesign --force --timestamp --keychain "$TROLLEY_KEYCHAIN" --sign "$TROLLEY_SIGN_ID" "$DMG"
+
+if notarize "$DMG" "설치 dmg"; then
+    # Stapling is what makes this work offline and on a first launch with no
+    # network -- the ticket travels inside the dmg instead of being looked up.
+    #
+    # It routinely fails for a while right after Accepted: the ticket is issued
+    # (it is listed in `notarytool log`) but Apple's distribution endpoint has not
+    # started serving it, and stapler reports "Could not validate ticket". Retry
+    # rather than fail the build.
+    stapled=false
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+        if xcrun stapler staple "$DMG" >/dev/null 2>&1; then
+            stapled=true
+            break
+        fi
+        echo "    스테이플 대기 중… ($attempt/10)"
+        sleep 60
+    done
+    if $stapled; then
+        xcrun stapler validate "$DMG"
+    else
+        echo "==> 스테이플 실패: 공증은 통과했으나 티켓이 아직 배포되지 않았습니다."
+        echo "    인터넷이 있는 맥에서는 온라인 확인으로 통과합니다."
+        echo "    나중에 다시: xcrun stapler staple $DMG"
+    fi
+fi
+rm -rf "$DMGROOT"
+
+# --- 7. Sign and notarize the package ------------------------------------------
 # A pkg needs a Developer ID *Installer* certificate -- a different certificate
 # from the Application one used above, and one this team does not have yet.
 # notarytool rejects unsigned packages, so both steps wait on it together.
@@ -124,6 +177,7 @@ else
 fi
 
 echo
-echo "완성: $PKG"
+echo "완성: $DMG                (배포용 — 서명·공증·스테이플)"
+echo "      $PKG          (Installer 인증서가 생기면 이쪽이 주력)"
 echo "      $DIST/trolley-universal      (trolley update 용 자산)"
 echo "      $DIST/trolley-universal.zip  (공증 제출본)"
