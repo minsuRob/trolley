@@ -24,24 +24,40 @@ public enum InstallLocation: Equatable {
 /// Finds the `claude` executable so registration can happen in-app instead of
 /// asking someone to paste a command.
 public enum ClaudeCLI {
-    /// Install locations in the order we prefer them: the per-user install the
-    /// Claude Code installer writes, then the two Homebrew prefixes.
+    /// Install locations in the order we prefer them. `~/.local/bin` comes first
+    /// because that is where the current installer puts it -- leaving it out is
+    /// what made the setup window report "claude 명령을 찾지 못했습니다" on a
+    /// machine where `claude` worked perfectly in the terminal.
     public static let searchPaths = [
+        "~/.local/bin/claude",
         "~/.claude/local/claude",
         "/opt/homebrew/bin/claude",
         "/usr/local/bin/claude",
+        "~/.bun/bin/claude",
+        "~/.npm-global/bin/claude",
         "/usr/bin/claude"
     ]
 
+    /// - Parameter shellLookup: asks the user's login shell where `claude` is.
+    ///   A list of paths can only ever be a guess -- npm prefixes, version
+    ///   managers and custom prefixes all move it -- so the shell, which owns the
+    ///   real PATH, gets the last word.
     public static func locate(
         exists: (String) -> Bool = { FileManager.default.isExecutableFile(atPath: $0) },
-        home: String = NSHomeDirectory()
+        home: String = NSHomeDirectory(),
+        shellLookup: () -> String? = { nil }
     ) -> String? {
         for candidate in searchPaths {
             let path = candidate.hasPrefix("~/")
                 ? home + String(candidate.dropFirst(1))
                 : candidate
             if exists(path) { return path }
+        }
+        // Only absolute paths: `command -v` answers with "claude: aliased to ..."
+        // when it is a shell alias, which is not something we can exec.
+        if let found = shellLookup()?.trimmingCharacters(in: .whitespacesAndNewlines),
+           found.hasPrefix("/"), exists(found) {
+            return found
         }
         return nil
     }
@@ -51,12 +67,16 @@ public enum ClaudeCLI {
 public enum MCPRegistration {
     public static let serverName = "trolley"
 
+    /// `--scope user` rather than the default. The default is `local`, which ties
+    /// the entry to whatever directory the command ran in -- for a GUI app that
+    /// is wherever launchd happened to leave it, so the registration would exist
+    /// but never be found again.
     public static func addArguments(executablePath: String) -> [String] {
-        ["mcp", "add", serverName, "--", executablePath, "mcp"]
+        ["mcp", "add", "--scope", "user", serverName, "--", executablePath, "mcp"]
     }
 
     public static func removeArguments() -> [String] {
-        ["mcp", "remove", serverName]
+        ["mcp", "remove", "--scope", "user", serverName]
     }
 
     /// `claude mcp list` prints one `name: command` line per server. Matching the
@@ -70,7 +90,8 @@ public enum MCPRegistration {
     }
 
     /// The command to show when the CLI cannot be found and someone has to run
-    /// it themselves.
+    /// it themselves. Carries the same `--scope user`, so a hand-run command and
+    /// the button end up in the same place.
     public static func manualCommand(executablePath: String) -> String {
         "claude " + addArguments(executablePath: executablePath)
             .map { $0.contains(" ") ? "\"\($0)\"" : $0 }

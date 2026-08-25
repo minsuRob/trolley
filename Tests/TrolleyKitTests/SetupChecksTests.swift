@@ -31,10 +31,11 @@ final class InstallLocationTests: XCTestCase {
 }
 
 final class ClaudeCLITests: XCTestCase {
-    func testPrefersThePerUserInstall() {
+    /// ~/.local/bin is where the current installer writes it.
+    func testPrefersTheCurrentInstallerPath() {
         let found = ClaudeCLI.locate(exists: { _ in true }, home: "/Users/x")
 
-        XCTAssertEqual(found, "/Users/x/.claude/local/claude")
+        XCTAssertEqual(found, "/Users/x/.local/bin/claude")
     }
 
     func testFallsThroughToHomebrew() {
@@ -49,6 +50,26 @@ final class ClaudeCLITests: XCTestCase {
     func testReportsMissingRatherThanGuessing() {
         XCTAssertNil(ClaudeCLI.locate(exists: { _ in false }, home: "/Users/x"))
     }
+
+    /// The list of paths is a guess; the login shell owns the real PATH.
+    func testFallsBackToTheLoginShell() {
+        let found = ClaudeCLI.locate(
+            exists: { $0 == "/custom/prefix/bin/claude" },
+            home: "/Users/x",
+            shellLookup: { "/custom/prefix/bin/claude\n" }
+        )
+
+        XCTAssertEqual(found, "/custom/prefix/bin/claude")
+    }
+
+    /// `command -v` answers with prose for an alias, which cannot be executed.
+    func testIgnoresAShellAliasAnswer() {
+        XCTAssertNil(ClaudeCLI.locate(
+            exists: { _ in false },
+            home: "/Users/x",
+            shellLookup: { "claude: aliased to /opt/thing/claude" }
+        ))
+    }
 }
 
 final class MCPRegistrationTests: XCTestCase {
@@ -57,7 +78,8 @@ final class MCPRegistrationTests: XCTestCase {
 
         XCTAssertEqual(
             arguments,
-            ["mcp", "add", "trolley", "--", "/Applications/trolley.app/Contents/MacOS/trolley", "mcp"]
+            ["mcp", "add", "--scope", "user", "trolley", "--",
+             "/Applications/trolley.app/Contents/MacOS/trolley", "mcp"]
         )
     }
 
@@ -81,6 +103,9 @@ final class MCPRegistrationTests: XCTestCase {
     func testManualCommandQuotesPathsWithSpaces() {
         let command = MCPRegistration.manualCommand(executablePath: "/Volumes/trolley 0.1.0/trolley.app/Contents/MacOS/trolley")
 
-        XCTAssertEqual(command, "claude mcp add trolley -- \"/Volumes/trolley 0.1.0/trolley.app/Contents/MacOS/trolley\" mcp")
+        XCTAssertEqual(
+            command,
+            "claude mcp add --scope user trolley -- \"/Volumes/trolley 0.1.0/trolley.app/Contents/MacOS/trolley\" mcp"
+        )
     }
 }
