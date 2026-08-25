@@ -76,3 +76,30 @@ final class ActivityLogTests: XCTestCase {
         XCTAssertEqual(log.errorCount, 1, "the evicted error must still be counted")
     }
 }
+
+final class PanelFormatTests: XCTestCase {
+    func testUptimeIsMinutesAndSecondsUntilTheFirstHour() {
+        XCTAssertEqual(PanelFormat.uptime(0), "00:00")
+        XCTAssertEqual(PanelFormat.uptime(842), "14:02")
+        XCTAssertEqual(PanelFormat.uptime(3599), "59:59")
+    }
+
+    /// The old format was minutes-only, so a two-hour session read as "120:00".
+    func testUptimeGrowsAnHoursFieldRatherThanCountingPastSixty() {
+        XCTAssertEqual(PanelFormat.uptime(3600), "1:00:00")
+        XCTAssertEqual(PanelFormat.uptime(7442), "2:04:02")
+    }
+
+    func testDurationSwitchesToSecondsOnceMillisecondsGetUnreadable() {
+        XCTAssertEqual(PanelFormat.duration(0.142), "142 ms")
+        XCTAssertEqual(PanelFormat.duration(0.9994), "999 ms")
+        XCTAssertEqual(PanelFormat.duration(1.24), "1.2 s")
+    }
+
+    /// An argument rejected before any AX call takes microseconds; "0 ms" would
+    /// read as a broken timer.
+    func testSubMillisecondDurationsAreMarkedRatherThanRoundedToZero() {
+        XCTAssertEqual(PanelFormat.duration(0.0004), "<1 ms")
+        XCTAssertEqual(PanelFormat.duration(0), "0 ms")
+    }
+}
