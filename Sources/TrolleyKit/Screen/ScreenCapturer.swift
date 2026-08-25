@@ -48,7 +48,14 @@ public protocol ScreenCapturing {
 
 /// Real ScreenCaptureKit-backed implementation.
 public struct SystemScreenCapturer: ScreenCapturing {
-    public init() {}
+    /// Leave out windows owned by this process -- the floating status widget
+    /// is always-on-top, so it would photobomb every capture and hide whatever
+    /// UI sits underneath the corner it occupies.
+    private let excludeOwnWindows: Bool
+
+    public init(excludeOwnWindows: Bool = true) {
+        self.excludeOwnWindows = excludeOwnWindows
+    }
 
     public func hasScreenRecordingAccess() -> Bool {
         CGPreflightScreenCaptureAccess()
@@ -69,6 +76,7 @@ public struct SystemScreenCapturer: ScreenCapturing {
         // any context tied to the thread we're about to block.
         let semaphore = DispatchSemaphore(value: 0)
         let box = ResultBox()
+        let excludeOwnWindows = self.excludeOwnWindows
 
         Task.detached {
             do {
@@ -82,7 +90,11 @@ public struct SystemScreenCapturer: ScreenCapturing {
                     throw ScreenCaptureError.captureFailed("no display available")
                 }
 
-                let filter = SCContentFilter(display: display, excludingWindows: [])
+                let ownPid = pid_t(getpid())
+                let excluded = excludeOwnWindows
+                    ? content.windows.filter { $0.owningApplication?.processID == ownPid }
+                    : []
+                let filter = SCContentFilter(display: display, excludingWindows: excluded)
                 let configuration = SCStreamConfiguration()
                 // display.width/height are points; pointPixelScale gives the
                 // backing scale so we capture at native resolution.
