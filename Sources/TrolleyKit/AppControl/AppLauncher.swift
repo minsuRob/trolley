@@ -38,7 +38,8 @@ public struct WorkspaceAppLocator: RunningAppLocating {
     public func activate(bundleID: String) -> Bool {
         guard let app = NSWorkspace.shared.runningApplications
             .first(where: { $0.bundleIdentifier == bundleID }) else { return false }
-        return app.activate(options: [.activateIgnoringOtherApps])
+        // ignoringOtherApps is deprecated and has no effect from macOS 14.
+        return app.activate()
     }
 
     public func open(applicationAt url: URL) -> Bool {
