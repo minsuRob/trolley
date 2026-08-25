@@ -52,8 +52,9 @@ DiffusionGemma가 툴 콜을 안정적으로 생성하도록 프롬프트를 설
 
 - **접근성 권한은 trolley 바이너리 자체에, 경로 단위로 부여된다.** 부모 프로세스의
   권한과 무관하므로, 파이썬이 서브프로세스로 띄워도 그 바이너리 경로가 승인돼 있어야
-  한다. 설치파일이 고정 경로(`/usr/local/trolley/bin/trolley`)에 설치하므로 그 경로를
-  승인하고 `check_permissions`로 확인할 것.
+  한다. 설치파일이 `/Applications/trolley.app`에 고정 설치하므로
+  `/Applications/trolley.app/Contents/MacOS/trolley`를 승인하고 `check_permissions`로
+  확인할 것.
 - **stdout은 JSON-RPC 전용이다.** 진단 출력은 전부 stderr로 나간다.
 - **한 번에 한 요청만 처리한다.** AX 호출이 동기라 의도적으로 직렬이다. 즉 양쪽 모두
   직렬이므로, 에이전트 루프의 지연은 두 병목의 합이다.

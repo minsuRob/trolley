@@ -46,26 +46,32 @@ MCP 클라이언트가 trolley의 AX 원시 동작을 직접 호출할 수 있�
 
 ### 설치
 
-`trolley-<버전>.dmg`를 열고 **`trolley 설치`** 앱을 실행한다. 관리자 암호를 한 번 묻고
-끝난다. 그다음 새 터미널에서 두 단계를 마치면 된다.
+`trolley-<버전>.dmg`를 열고 **trolley.app을 Applications로 끌어다 놓는다.** 관리자 암호는
+필요 없다 — `/Applications`는 admin 그룹이 쓸 수 있다.
+
+앱을 더블클릭하면 권한 상태와 함께 붙여넣을 명령을 보여준다. 터미널에서 직접 해도 된다.
 
 ```sh
-trolley check-permissions --prompt                              # 출력된 경로를 시스템 설정에서 승인
-claude mcp add trolley -- /usr/local/trolley/bin/trolley mcp
+/Applications/trolley.app/Contents/MacOS/trolley check-permissions --prompt
+claude mcp add trolley -- /Applications/trolley.app/Contents/MacOS/trolley mcp
 ```
 
-설치되는 것은 두 개다.
+**CLI인데 왜 앱 번들인가.** 셋 다 이유가 있다.
 
-| 경로 | 용도 |
-| --- | --- |
-| `/usr/local/trolley/bin/trolley` | 실행 파일. 설치한 사용자 소유 |
-| `/etc/paths.d/trolley` | PATH 등록 — 새 터미널부터 `trolley`로 바로 호출된다 |
+- 접근성·화면 기록 권한(TCC)은 **실행 파일의 절대 경로**에 걸린다. `/Applications`에 놓인
+  번들은 그 경로가 고정이고, 시스템 설정에도 맨 경로 대신 이름과 아이콘으로 뜬다.
+- `/Applications`는 `drwxrwxr-x root:admin`이라 설치도, 이후 `trolley update`도 암호 없이
+  끝난다. 원자적 교체에는 파일이 아니라 그 **디렉터리** 쓰기 권한이 필요하다.
+- flat 패키지(`.pkg`)는 Developer ID **Installer** 인증서 없이는 서명할 수 없고, macOS는
+  미서명 pkg를 열어주지 않는다. 번들과 디스크 이미지는 가지고 있는 Application 인증서로
+  서명된다.
 
-`/usr/local/bin`이 아니라 **전용 디렉터리**인 데는 이유가 있다. 파일을 원자적으로 교체하려면
-파일이 아니라 그 **디렉터리**에 쓸 수 있어야 하는데 `/usr/local/bin`은 root 소유다. 전용
-디렉터리를 사용자 소유로 두면 업데이트가 관리자 암호 없이 끝난다. 심볼릭 링크를 쓰지 않는
-이유도 같은 맥락이다 — TCC는 링크가 아니라 해석된 실제 경로에 권한을 걸기 때문에, 링크를
-끼우면 안내하는 경로와 실제 승인 대상이 어긋난다.
+`trolley`를 터미널에서 이름만으로 부르고 싶으면 링크를 하나 걸면 된다. 링크를 타도
+`_NSGetExecutablePath` + `realpath`로 실제 경로를 보고하므로 TCC 안내가 어긋나지 않는다.
+
+```sh
+sudo ln -sf /Applications/trolley.app/Contents/MacOS/trolley /usr/local/bin/trolley
+```
 
 ### 업데이트
 
@@ -74,12 +80,16 @@ trolley update           # 최신 릴리스로 교체
 trolley update --check   # 확인만
 ```
 
-경로와 서명 신원이 둘 다 고정이므로 **권한을 다시 줄 필요가 없다.** 교체는 새 파일을 옆에
-받아 서명(팀 `46LU76SNUA`)을 검증한 뒤 `rename(2)`으로 갈아끼운다. 기존 파일 위에 덮어쓰면
-커널이 캐시한 코드 서명과 어긋나 실행 즉시 `Killed: 9`(SIGKILL)로 죽기 때문이다.
-이미 실행 중인 `trolley mcp`는 재시작해야 새 버전이 된다.
+경로와 서명 신원이 둘 다 고정이므로 **권한을 다시 줄 필요가 없다.** 실행 위치를 보고
+번들이면 번들 통째로, 맨 실행 파일이면 그 파일만 교체한다. 번들 안의 실행 파일만 갈아끼우는
+길은 없다 — 실행 파일의 code directory가 `Info.plist`를 해시하므로, 번들 밖에서 서명된
+바이너리는 어느 번들에도 맞지 않는다.
 
-접근성 권한은 **trolley 바이너리 자체**에 부여된다. Claude Code의 자식 프로세스로 실행돼도
+교체는 옆에 받아 서명(팀 `46LU76SNUA`)을 검증한 뒤 `renamex_np(RENAME_SWAP)`으로 맞바꾼다.
+원자적이라 중간에 죽어도 경로가 비지 않고, 덮어쓰기가 아니라서 커널이 캐시한 코드 서명과
+어긋나 `Killed: 9`로 죽는 일도 없다. 이미 실행 중인 `trolley mcp`는 재시작해야 새 버전이 된다.
+
+접근성 권한은 **trolley 실행 파일 자체**에 부여된다. Claude Code의 자식 프로세스로 실행돼도
 부모의 권한과는 무관하다.
 
 ### 설치파일 만들기 (개발자용)
@@ -88,43 +98,31 @@ trolley update --check   # 확인만
 ./Scripts/build-installer.sh
 ```
 
-유니버설(arm64 + x86_64) 릴리스를 빌드해 Developer ID Application으로 서명하고, 공증한 뒤
-`dist/`에 `.pkg`와 업데이트용 바이너리를 만든다. 서명 자산은 MAKi 데스크톱 릴리스가 쓰는
-것과 같은 SSM 파라미터(`/front/master/MAC_*`, `/front/master/APPLE_*`)에서 가져오며,
-`TROLLEY_CERT_PEM` / `TROLLEY_KEY_PEM`으로 직접 지정할 수도 있다.
-
-서명은 임시 키체인에서 이뤄지고 **EXIT 트랩으로 반드시 복원**된다 — 키체인 검색 목록과 기본
-키체인을 건드렸다가 복원에 실패하면 죽은 키체인이 쌓이고, 그러면 이후 모든 `codesign`이
-암호를 묻는 대화상자를 띄운다.
-
-`dist/`에 세 가지가 나온다.
+유니버설(arm64 + x86_64) 릴리스를 빌드해 앱 번들로 조립하고, Developer ID Application으로
+서명·공증한 뒤 `dist/`에 둘을 만든다.
 
 | 산출물 | 용도 |
 | --- | --- |
-| `trolley-<버전>.dmg` | **배포용.** 서명·공증·스테이플된 디스크 이미지 안에 설치 앱 |
-| `trolley-<버전>.pkg` | 이 맥에서 `installer -pkg` 로 쓰는 용도. 미서명이라 배포 불가 |
-| `trolley-universal` | `trolley update` 가 받아가는 서명된 바이너리 |
+| `trolley-<버전>.dmg` | 배포용. `trolley.app` + `/Applications` 별칭 |
+| `trolley-app.zip` | `trolley update` 가 받아가는 서명된 번들 |
 
-**배포본이 pkg가 아니라 dmg인 이유.** flat 패키지 서명에는 Developer ID **Installer**
-인증서가 필요하고 — Application 인증서와 다른 종류다 — 우리에겐 없다. `productsign`이
-그대로 거절하고(`An installer signing identity ... is required`), 미서명 pkg는 공증도
-`Invalid`로 떨어진다. 서명된 dmg 안에 넣어도 마찬가지다. 셋 다 실측으로 확인했다.
-반면 **앱 번들과 디스크 이미지는 Application 인증서로 서명된다.** 그래서 설치 로직을
-AppleScript 앱(`Scripts/dmg/installer.applescript`)에 담아 dmg로 낸다 — MAKi 데스크톱
-릴리스와 같은 모양이다.
+서명 자산은 MAKi 데스크톱 릴리스가 쓰는 것과 같은 SSM 파라미터
+(`/front/master/MAC_*`, `/front/master/APPLE_*`)에서 가져온다.
+`TROLLEY_CERT_PEM` / `TROLLEY_KEY_PEM`으로 직접 지정할 수도 있다. 서명은 임시 키체인에서
+이뤄지고 **EXIT 트랩으로 반드시 복원**된다 — 키체인 검색 목록과 기본 키체인을 건드렸다가
+복원에 실패하면 죽은 키체인이 쌓이고, 그러면 이후 모든 `codesign`이 암호 대화상자를 띄운다.
 
-Installer 인증서를 발급하면 스크립트의 pkg 서명 블록이 그대로 동작하고, 그때부터 pkg를
-주력으로 삼으면 된다.
+**pkg 를 포기한 이유.** 셋 다 실측했다. `productsign`은 Application 인증서를 거절하고
+(`An installer signing identity ... is required for signing flat-style products`),
+미서명 pkg는 공증이 `Invalid`, 서명된 dmg 안에 넣어도 `Invalid`다. Developer ID Installer
+인증서를 발급하면 pkg 경로를 되살릴 수 있다.
 
-**스테이플이 실패해도 배포는 된다.** 스크립트는 1분 간격으로 열 번까지 다시 시도하고,
-끝내 안 되면 경고만 남긴다.
-
-이 개발 머신에서는 지금 스테이플이 항상 실패한다(`Could not validate ticket`, Error 65).
-전파 지연이 아니다 — `stapler -v`가 티켓을 **정상적으로 내려받고**(레코드
-`2/2/<dmg의 cdhash>`, `recordType = DeveloperIDTicket`) 그 다음 검증에서 넘어진다.
-우리 산출물 문제도 아니다: **이미 공증된 제3자 앱(`/Applications/Maccy.app`)을 복사해
-스테이플을 떼고 다시 붙여도 똑같이 Error 65가 난다.** Xcode 26.4 를 macOS 26.3 위에서
-쓰는 조합의 문제로 보인다. 툴체인이나 OS가 올라간 뒤 다시 시도할 것:
+**스테이플이 실패해도 배포는 된다.** 이 개발 머신에서는 지금 항상 실패한다
+(`Could not validate ticket`, Error 65). 전파 지연이 아니다 — `stapler -v`가 티켓을
+**정상적으로 내려받고**(레코드 `2/2/<cdhash>`, `recordType = DeveloperIDTicket`) 그 다음
+검증에서 넘어진다. 우리 산출물 문제도 아니다: **이미 공증된 제3자 앱
+(`/Applications/Maccy.app`)을 복사해 스테이플을 떼고 다시 붙여도 똑같이 Error 65**가 난다.
+Xcode 26.4를 macOS 26.3 위에서 쓰는 조합으로 보인다. 툴체인이나 OS가 올라간 뒤 다시 시도할 것:
 
 ```sh
 xcrun stapler staple dist/trolley-<버전>.dmg
