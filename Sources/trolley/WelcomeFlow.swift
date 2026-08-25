@@ -14,7 +14,6 @@ import TrolleyWidget
 enum WelcomeFlow {
     private static var widget: StatusWidgetController?
     private static var setup: SetupWindowController?
-    private static var delegate: AppDelegate?
 
     /// launchd sets `__CFBundleIdentifier` to the identifier of the bundle it
     /// opened. Merely being set is not enough to go on: Terminal exports its own
@@ -32,9 +31,7 @@ enum WelcomeFlow {
         return environment["__CFBundleIdentifier"] == bundleIdentifier
     }
 
-    /// - Parameter alwaysShowSetup: true when someone asked for the window by
-    ///   name (`trolley setup`), where opening nothing would look broken.
-    static func run(alwaysShowSetup: Bool = false) {
+    static func run() {
         let app = NSApplication.shared
         // .accessory: a pet on screen, not an app in the Dock. Windows still
         // open and come forward.
@@ -45,7 +42,7 @@ enum WelcomeFlow {
                 (SystemTrustChecker().isProcessTrusted(), CGPreflightScreenCaptureAccess())
             },
             onQuit: { NSApp.terminate(nil) },
-            onOpenSettings: { openSetup(force: true) }
+            onOpenSettings: { openSetup() }
         )
         widget = controller
         controller.show()
@@ -57,36 +54,23 @@ enum WelcomeFlow {
             }
         )
 
-        let appDelegate = AppDelegate()
-        delegate = appDelegate
-        app.delegate = appDelegate
-
-        // Only in the way when something actually needs attention; otherwise the
-        // pet is the whole interface.
-        openSetup(force: alwaysShowSetup)
+        // Shown on launch only while something still needs attention -- a fresh
+        // install has to say what to grant. Once it is all set the pet is the
+        // whole interface, and the pet's menu is the one way back.
+        if !SetupWindowController.isEverythingReady() {
+            openSetup()
+        }
         app.run()
     }
 
-    /// - Parameter force: opened from the menu, so show it even when nothing is
-    ///   outstanding.
-    static func openSetup(force: Bool) {
+    /// The only way to open the window after setup is done: 펫 우클릭 → 설정 열기.
+    static func openSetup() {
         if let existing = setup, existing.isVisible {
             existing.bringToFront()
             return
         }
-        if !force && SetupWindowController.isEverythingReady() { return }
-
         let controller = SetupWindowController()
         setup = controller
         controller.show()
-    }
-}
-
-/// Re-opening the app from Finder brings the setup window back -- with no Dock
-/// icon there is nowhere else for a second launch to go.
-private final class AppDelegate: NSObject, NSApplicationDelegate {
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        WelcomeFlow.openSetup(force: true)
-        return true
     }
 }
