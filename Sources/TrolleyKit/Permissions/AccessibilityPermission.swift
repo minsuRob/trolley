@@ -23,10 +23,22 @@ public struct SystemTrustChecker: TrustChecking {
 public enum AccessibilityPermission {
     /// The absolute path of the currently running executable, since Accessibility
     /// trust in System Settings is granted per executable path.
+    ///
+    /// Asks dyld rather than reading `argv[0]`: invoked through PATH, argv[0] is
+    /// the bare word "trolley" and resolving it against the working directory
+    /// yields a path that does not exist. Users would then approve the wrong path
+    /// and never become trusted. `realpath` on top, because TCC keys on the
+    /// resolved file, not on any symlink pointing at it.
     public static func currentExecutablePath() -> String {
-        guard let first = CommandLine.arguments.first else { return "(unknown)" }
-        let url = URL(fileURLWithPath: first)
-        return url.standardizedFileURL.path
+        var size = UInt32(PATH_MAX)
+        var buffer = [CChar](repeating: 0, count: Int(size))
+        guard _NSGetExecutablePath(&buffer, &size) == 0 else { return "(unknown)" }
+
+        var resolved = [CChar](repeating: 0, count: Int(PATH_MAX))
+        if realpath(buffer, &resolved) != nil {
+            return String(cString: resolved)
+        }
+        return String(cString: buffer)
     }
 
     /// Returns true if trusted. If `prompt` is true and not yet trusted, this will

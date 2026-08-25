@@ -1,4 +1,5 @@
 import Foundation
+import TrolleyKit
 
 public struct ToolDefinition {
     public let name: String
@@ -32,7 +33,7 @@ public protocol ToolProviding {
 /// MCP. Reading and writing are injected so the whole protocol layer is testable
 /// without spawning a process.
 public struct MCPServer {
-    public static let serverVersion = "0.1.0"
+    public static let serverVersion = TrolleyVersion.current
     /// Versions we know how to speak. We echo the client's version when it's one
     /// of these, and otherwise answer with our preferred one.
     static let supportedProtocolVersions = ["2025-06-18", "2025-03-26", "2024-11-05"]

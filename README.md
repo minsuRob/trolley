@@ -44,22 +44,62 @@ MCP 클라이언트가 trolley의 AX 원시 동작을 직접 호출할 수 있�
 필요가 없고, 프로세스가 살아 있는 동안 요소 참조를 `e1`, `e2` 같은 **안정적인 ID로 유지**한다 —
 매 호출마다 앱 루트부터 텍스트로 재탐색하는 CLI의 콜드 스타트 문제가 사라진다.
 
-### 연결
+### 설치
+
+`trolley-<버전>.pkg`를 더블클릭한 뒤, 새 터미널에서 두 단계를 마치면 된다.
 
 ```sh
-swift build -c release
-rm -f ~/bin/trolley                         # 덮어쓰기 금지: 아래 참고
-cp .build/release/trolley ~/bin/trolley     # 권한은 경로 단위이므로 안정된 경로에 설치
-codesign -f -s - ~/bin/trolley              # 애드혹 재서명
-~/bin/trolley check-permissions --prompt    # 시스템 설정에서 이 경로를 승인
-claude mcp add trolley -- ~/bin/trolley mcp
+trolley check-permissions --prompt                              # 출력된 경로를 시스템 설정에서 승인
+claude mcp add trolley -- /usr/local/trolley/bin/trolley mcp
 ```
 
-기존 파일 위에 그대로 `cp`하면 커널이 캐시한 코드 서명과 어긋나 실행 즉시
-`Killed: 9`(SIGKILL)로 죽는다. **지우고 복사한 뒤 재서명**하면 된다.
+설치되는 것은 두 개다.
+
+| 경로 | 용도 |
+| --- | --- |
+| `/usr/local/trolley/bin/trolley` | 실행 파일. 설치한 사용자 소유 |
+| `/etc/paths.d/trolley` | PATH 등록 — 새 터미널부터 `trolley`로 바로 호출된다 |
+
+`/usr/local/bin`이 아니라 **전용 디렉터리**인 데는 이유가 있다. 파일을 원자적으로 교체하려면
+파일이 아니라 그 **디렉터리**에 쓸 수 있어야 하는데 `/usr/local/bin`은 root 소유다. 전용
+디렉터리를 사용자 소유로 두면 업데이트가 관리자 암호 없이 끝난다. 심볼릭 링크를 쓰지 않는
+이유도 같은 맥락이다 — TCC는 링크가 아니라 해석된 실제 경로에 권한을 걸기 때문에, 링크를
+끼우면 안내하는 경로와 실제 승인 대상이 어긋난다.
+
+### 업데이트
+
+```sh
+trolley update           # 최신 릴리스로 교체
+trolley update --check   # 확인만
+```
+
+경로와 서명 신원이 둘 다 고정이므로 **권한을 다시 줄 필요가 없다.** 교체는 새 파일을 옆에
+받아 서명(팀 `46LU76SNUA`)을 검증한 뒤 `rename(2)`으로 갈아끼운다. 기존 파일 위에 덮어쓰면
+커널이 캐시한 코드 서명과 어긋나 실행 즉시 `Killed: 9`(SIGKILL)로 죽기 때문이다.
+이미 실행 중인 `trolley mcp`는 재시작해야 새 버전이 된다.
 
 접근성 권한은 **trolley 바이너리 자체**에 부여된다. Claude Code의 자식 프로세스로 실행돼도
-부모의 권한과는 무관하며, 재빌드로 바이너리가 바뀌면 다시 승인해야 할 수 있다.
+부모의 권한과는 무관하다.
+
+### 설치파일 만들기 (개발자용)
+
+```sh
+./Scripts/build-installer.sh
+```
+
+유니버설(arm64 + x86_64) 릴리스를 빌드해 Developer ID Application으로 서명하고, 공증한 뒤
+`dist/`에 `.pkg`와 업데이트용 바이너리를 만든다. 서명 자산은 MAKi 데스크톱 릴리스가 쓰는
+것과 같은 SSM 파라미터(`/front/master/MAC_*`, `/front/master/APPLE_*`)에서 가져오며,
+`TROLLEY_CERT_PEM` / `TROLLEY_KEY_PEM`으로 직접 지정할 수도 있다.
+
+서명은 임시 키체인에서 이뤄지고 **EXIT 트랩으로 반드시 복원**된다 — 키체인 검색 목록과 기본
+키체인을 건드렸다가 복원에 실패하면 죽은 키체인이 쌓이고, 그러면 이후 모든 `codesign`이
+암호를 묻는 대화상자를 띄운다.
+
+`.pkg` 자체는 아직 서명되지 않는다. 여기엔 Developer ID **Installer** 인증서가 필요한데
+(위에서 쓰는 Application 인증서와 다른 종류다) 아직 없다. 공증도 서명된 pkg만 받으므로 함께
+보류 상태다. 발급해서 넣으면 스크립트의 해당 블록이 그대로 동작한다. 그전까지 다른 맥에서는
+첫 실행 시 우클릭 → 열기가 필요하다.
 
 ### 종료
 

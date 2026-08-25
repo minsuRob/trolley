@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>trolley</title>
+    <organization>ink.markhub</organization>
+    <!-- System-wide only: the install path is fixed because Accessibility and
+         Screen Recording grants are keyed to it. -->
+    <domains enable_localSystem="true" enable_anywhere="false" enable_currentUserHome="false"/>
+    <options customize="never" require-scripts="true" hostArchitectures="arm64,x86_64"/>
+    <volume-check>
+        <allowed-os-versions>
+            <os-version min="14.0"/>
+        </allowed-os-versions>
+    </volume-check>
+    <welcome file="welcome.html" mime-type="text/html"/>
+    <conclusion file="conclusion.html" mime-type="text/html"/>
+    <choices-outline>
+        <line choice="ink.markhub.trolley"/>
+    </choices-outline>
+    <choice id="ink.markhub.trolley" visible="false">
+        <pkg-ref id="ink.markhub.trolley"/>
+    </choice>
+    <pkg-ref id="ink.markhub.trolley">trolley-component.pkg</pkg-ref>
+</installer-gui-script>
