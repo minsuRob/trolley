@@ -7,20 +7,18 @@ final class SetupRow: NSStackView {
         case done
         case actionNeeded
         case blocked
+        /// Nice to have, not in the way -- deliberately grey rather than red, so
+        /// a window with one of these still reads as "ready".
+        case optional
 
-        var symbol: String {
-            switch self {
-            case .done: return "●"
-            case .actionNeeded: return "●"
-            case .blocked: return "●"
-            }
-        }
+        var symbol: String { "●" }
 
         var color: NSColor {
             switch self {
             case .done: return .systemGreen
             case .actionNeeded: return .systemOrange
             case .blocked: return .systemRed
+            case .optional: return .tertiaryLabelColor
             }
         }
     }

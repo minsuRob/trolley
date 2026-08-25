@@ -18,9 +18,13 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     private let pathLabel = NSTextField(labelWithString: "")
     private var refreshTimer: Timer?
 
-    /// Cached because `claude mcp list` shells out; the timer must not run it
-    /// twice a second.
+    /// Both cached because they shell out; the timer must not run them twice a
+    /// second. Re-checked on a slower beat so registering from a terminal still
+    /// turns the row green without relaunching.
     private var mcpRegistered: Bool?
+    private var lastMCPCheck: Date?
+    private var mcpCheckInFlight = false
+    private var claudePath: String??
 
     private var executablePath: String { AccessibilityPermission.currentExecutablePath() }
     private var bundlePath: String { Bundle.main.bundleURL.path }
@@ -59,7 +63,7 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     // MARK: - Layout
 
     private func makeContentView() -> NSView {
-        let heading = NSTextField(labelWithString: "trolley를 쓰려면 아래 네 가지가 준비돼야 합니다.")
+        let heading = NSTextField(labelWithString: "위 세 가지가 준비되면 trolley는 동작합니다.")
         heading.font = .systemFont(ofSize: 13, weight: .semibold)
 
         pathLabel.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
@@ -130,41 +134,70 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         refreshMCPRow()
     }
 
+    /// Optional by design: trolley works as a CLI without it, and someone who
+    /// wants to connect Claude Code later should not be looking at a red dot in
+    /// the meantime.
     private func refreshMCPRow() {
-        guard let claude = ClaudeCLI.locate() else {
+        guard let claude = locateClaude() else {
             mcpRow.update(
-                state: .blocked,
-                detail: "claude 명령을 찾지 못했습니다. 아래 명령을 터미널에서 실행하세요.",
+                state: .optional,
+                detail: "선택 사항. claude 명령을 찾지 못했으니, 연결하려면 아래 명령을 터미널에서 실행하세요.",
                 button: "명령 복사",
                 action: { [weak self] in self?.copyManualCommand() }
             )
             return
         }
         if mcpRegistered == true {
-            mcpRow.update(state: .done, detail: "MCP 서버로 등록됨", button: "다시 등록", action: { [weak self] in
+            mcpRow.update(state: .done, detail: "MCP 서버로 등록됨 (user 스코프)", button: "다시 등록", action: { [weak self] in
                 self?.registerMCP(claude: claude)
             })
-            return
+        } else {
+            mcpRow.update(
+                state: .optional,
+                detail: "선택 사항. 지금 연결해도 되고 나중에 이 창을 다시 열어도 됩니다.",
+                button: "연결하기",
+                action: { [weak self] in self?.registerMCP(claude: claude) }
+            )
         }
-        mcpRow.update(
-            state: .actionNeeded,
-            detail: "Claude Code에 MCP 서버로 등록합니다.",
-            button: "등록하기",
-            action: { [weak self] in self?.registerMCP(claude: claude) }
-        )
-        // Only ever asked once per launch until a registration changes it.
-        if mcpRegistered == nil {
-            mcpRegistered = false
-            DispatchQueue.global(qos: .utility).async { [weak self] in
+        checkRegistrationIfDue(claude: claude)
+    }
+
+    /// Re-asks every few seconds rather than once per launch, so a registration
+    /// made in a terminal shows up here without a relaunch.
+    private func checkRegistrationIfDue(claude: String) {
+        guard !mcpCheckInFlight else { return }
+        if let last = lastMCPCheck, Date().timeIntervalSince(last) < 4 { return }
+        mcpCheckInFlight = true
+        lastMCPCheck = Date()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let listed = Self.run(claude, ["mcp", "list"])
+            let registered = MCPRegistration.isRegistered(listOutput: listed.output)
+            DispatchQueue.main.async {
                 guard let self else { return }
-                let listed = Self.run(claude, ["mcp", "list"])
-                let registered = MCPRegistration.isRegistered(listOutput: listed.output)
-                DispatchQueue.main.async {
+                self.mcpCheckInFlight = false
+                if self.mcpRegistered != registered {
                     self.mcpRegistered = registered
                     self.refreshMCPRow()
                 }
             }
         }
+    }
+
+    /// Looked up once and remembered -- including the answer "not installed", so
+    /// a missing CLI does not spawn a login shell on every tick.
+    private func locateClaude() -> String? {
+        if let cached = claudePath { return cached }
+        let found = ClaudeCLI.locate(shellLookup: Self.shellLookupClaude)
+        claudePath = .some(found)
+        return found
+    }
+
+    /// The user's login shell owns the real PATH; a fixed list of install
+    /// locations cannot keep up with npm prefixes and version managers.
+    private static func shellLookupClaude() -> String? {
+        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        let result = run(shell, ["-lic", "command -v claude"], timeout: 5)
+        return result.status == 0 ? result.output : nil
     }
 
     // MARK: - Actions
@@ -243,7 +276,14 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         alert.beginSheetModal(for: window, completionHandler: nil)
     }
 
-    private static func run(_ launchPath: String, _ arguments: [String]) -> (status: Int32, output: String) {
+    /// - Parameter timeout: seconds before the process is killed. An interactive
+    ///   login shell is the reason this exists -- a chatty or prompting rc file
+    ///   would otherwise hang the lookup forever.
+    private static func run(
+        _ launchPath: String,
+        _ arguments: [String],
+        timeout: TimeInterval? = nil
+    ) -> (status: Int32, output: String) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: launchPath)
         process.arguments = arguments
@@ -254,6 +294,11 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
             try process.run()
         } catch {
             return (-1, error.localizedDescription)
+        }
+        if let timeout {
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {
+                if process.isRunning { process.terminate() }
+            }
         }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
