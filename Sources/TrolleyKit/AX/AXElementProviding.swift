@@ -16,11 +16,21 @@ public protocol AXElementProviding: AnyObject {
 
     /// Stable identity for cycle detection / dedup, independent of attribute values.
     func identity() -> ObjectIdentifier
+
+    /// Whether the underlying UI element still exists. A cached reference goes
+    /// stale as soon as the app tears down that view, so anything holding
+    /// elements across calls (the MCP element registry) must be able to tell.
+    func isAlive() -> Bool
 }
 
 public extension AXElementProviding {
     func identity() -> ObjectIdentifier {
         ObjectIdentifier(self)
+    }
+
+    /// Fakes are always alive; only `SystemAXElement` can actually go stale.
+    func isAlive() -> Bool {
+        true
     }
 
     func stringAttribute(_ name: String) -> String? {
