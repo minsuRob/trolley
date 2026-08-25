@@ -15,6 +15,11 @@ private final class WidgetContentView: FolderIconView {
     var onRightClick: ((NSEvent) -> Void)?
     private var originAtMouseDown: NSPoint?
 
+    /// trolley is almost never the active app -- it is a companion to whatever
+    /// the user is working in. Without this, the first click on the widget is
+    /// swallowed as an activation click and the panel only opens on the second.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func mouseDown(with event: NSEvent) {
         originAtMouseDown = window?.frame.origin
         // Not calling super lets isMovableByWindowBackground handle the drag.
