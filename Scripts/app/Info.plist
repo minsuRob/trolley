@@ -4,6 +4,8 @@
 <dict>
 	<key>CFBundleExecutable</key>
 	<string>trolley</string>
+	<key>CFBundleIconFile</key>
+	<string>trolley</string>
 	<key>CFBundleIdentifier</key>
 	<string>ink.markhub.trolley</string>
 	<key>CFBundleName</key>

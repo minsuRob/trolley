@@ -31,7 +31,8 @@ struct Trolley: ParsableCommand {
             FocusProbeCommand.self,
             SetValueProbeCommand.self,
             SetValueByTextCommand.self,
-            ActionNamesProbeCommand.self
+            ActionNamesProbeCommand.self,
+            ExportIconCommand.self
         ]
     )
 }

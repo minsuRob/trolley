@@ -72,9 +72,28 @@ class FolderIconView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard let context = NSGraphicsContext.current?.cgContext else { return }
+        // The view is flipped, so the art's y-down coordinates land as drawn.
+        FolderIconArt.draw(in: context, size: bounds.size, isFlipped: true)
+    }
+
+}
+
+/// The folder drawing itself, separated from the view so the app icon can be
+/// rendered from the same paths -- the icon and the widget's face are then the
+/// same picture by construction, not by two people redrawing it.
+public enum FolderIconArt {
+    /// - Parameter isFlipped: true when the destination already has y running
+    ///   downward, as a flipped `NSView` does. A bitmap context does not, so the
+    ///   art is flipped for it here.
+    public static func draw(in context: CGContext, size: CGSize, isFlipped: Bool) {
+        context.saveGState()
+        if !isFlipped {
+            context.translateBy(x: 0, y: size.height)
+            context.scaleBy(x: 1, y: -1)
+        }
         context.saveGState()
         // Scale the 128x128 viewBox to our bounds.
-        context.scaleBy(x: bounds.width / 128, y: bounds.height / 128)
+        context.scaleBy(x: size.width / 128, y: size.height / 128)
 
         let stroke = NSColor(srgbRed: 0xBE / 255, green: 0x86 / 255, blue: 0x13 / 255, alpha: 1)
 
@@ -90,7 +109,7 @@ class FolderIconView: NSView {
         back.addLine(to: CGPoint(x: 112, y: 106))
         back.addLine(to: CGPoint(x: 6, y: 106))
         back.closeSubpath()
-        fill(back, in: context, gradient: [
+        fillPath(back, in: context, gradient: [
             (NSColor(srgbRed: 0xF7 / 255, green: 0xDC / 255, blue: 0x80 / 255, alpha: 1), 0),
             (NSColor(srgbRed: 0xE5 / 255, green: 0xB3 / 255, blue: 0x34 / 255, alpha: 1), 1)
         ], from: CGPoint(x: 59, y: 30), to: CGPoint(x: 59, y: 106))
@@ -107,7 +126,7 @@ class FolderIconView: NSView {
         front.addLine(to: CGPoint(x: 12, y: 110.7))
         front.addArc(tangent1End: CGPoint(x: 6, y: 110.7), tangent2End: CGPoint(x: 6, y: 106), radius: 6)
         front.closeSubpath()
-        fill(front, in: context, gradient: [
+        fillPath(front, in: context, gradient: [
             (NSColor(srgbRed: 0xFF / 255, green: 0xE7 / 255, blue: 0x9A / 255, alpha: 1), 0),
             (NSColor(srgbRed: 0xF7 / 255, green: 0xCB / 255, blue: 0x52 / 255, alpha: 1), 0.45),
             (NSColor(srgbRed: 0xE3 / 255, green: 0xA6 / 255, blue: 0x16 / 255, alpha: 1), 1)
@@ -121,15 +140,16 @@ class FolderIconView: NSView {
         gloss.addLine(to: CGPoint(x: 117, y: 70.5))
         gloss.addLine(to: CGPoint(x: 16.2, y: 70.5))
         gloss.closeSubpath()
-        fill(gloss, in: context, gradient: [
+        fillPath(gloss, in: context, gradient: [
             (NSColor.white.withAlphaComponent(0.5), 0),
             (NSColor.white.withAlphaComponent(0), 1)
         ], from: CGPoint(x: 68, y: 55.5), to: CGPoint(x: 68, y: 70.5))
 
         context.restoreGState()
+        context.restoreGState()
     }
 
-    private func fill(
+    private static func fillPath(
         _ path: CGPath,
         in context: CGContext,
         gradient stops: [(color: NSColor, location: CGFloat)],
@@ -148,7 +168,7 @@ class FolderIconView: NSView {
         context.restoreGState()
     }
 
-    private func strokePath(_ path: CGPath, in context: CGContext, color: NSColor) {
+    private static func strokePath(_ path: CGPath, in context: CGContext, color: NSColor) {
         context.saveGState()
         context.addPath(path)
         context.setStrokeColor(color.cgColor)
