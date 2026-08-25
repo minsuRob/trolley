@@ -10,7 +10,11 @@ struct Trolley: ParsableCommand {
             DumpTreeCommand.self,
             RunCommand.self,
             ClickCommand.self,
-            TypeCommand.self
+            TypeCommand.self,
+            FocusProbeCommand.self,
+            SetValueProbeCommand.self,
+            SetValueByTextCommand.self,
+            ActionNamesProbeCommand.self
         ]
     )
 }
