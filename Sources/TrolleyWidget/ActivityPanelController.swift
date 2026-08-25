@@ -60,6 +60,17 @@ private final class PromptTextField: NSTextField {
     }
 }
 
+/// The panel's own close button.
+///
+/// Clicking the folder again already closes the panel, but that is invisible
+/// until someone tries it. This is the same action with a target to aim at.
+private final class PanelCloseButton: NSButton {
+    /// The panel belongs to an inactive app, and without this the first click on
+    /// it is spent activating rather than pressing -- the same trap the prompt
+    /// field and the widget's own view have to step around.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 /// The click-to-open panel: session stats, permission dots, the most recent
 /// tool calls, and a box for handing the agent a prompt. A child window of the
 /// widget panel, so it follows drags.
@@ -189,6 +200,10 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         position()
     }
 
+    @objc private func closePanel() {
+        hide()
+    }
+
     func hide() {
         releaseFocus()
         widgetPanel.removeChildWindow(panel)
@@ -209,7 +224,28 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
     private func buildChrome() {
         let title = Self.makeLabel(Style.title, .labelColor)
         title.stringValue = "trolley"
-        stack.addArrangedSubview(headerRow(title, uptimeLabel))
+
+        let close = PanelCloseButton()
+        close.isBordered = false
+        close.bezelStyle = .inline
+        close.imagePosition = .imageOnly
+        close.image = NSImage(
+            systemSymbolName: "xmark.circle.fill",
+            accessibilityDescription: "패널 닫기"
+        )
+        close.contentTintColor = .tertiaryLabelColor
+        close.toolTip = "닫기"
+        close.target = self
+        close.action = #selector(closePanel)
+        close.setContentHuggingPriority(.required, for: .horizontal)
+
+        // Top left, ahead of the title: where a window's close button lives.
+        let leading = NSStackView(views: [close, title])
+        leading.orientation = .horizontal
+        leading.alignment = .centerY
+        leading.spacing = 6
+
+        stack.addArrangedSubview(headerRow(leading, uptimeLabel, alignment: .centerY))
         stack.addArrangedSubview(statsLabel)
 
         axLabel.stringValue = "AX"
@@ -270,10 +306,17 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         return pair
     }
 
-    private func headerRow(_ leading: NSView, _ trailing: NSView) -> NSStackView {
+    /// - Parameter alignment: baseline keeps two labels sitting on one line;
+    ///   a row carrying the close button needs its centres matched instead,
+    ///   since an image has no baseline to share.
+    private func headerRow(
+        _ leading: NSView,
+        _ trailing: NSView,
+        alignment: NSLayoutConstraint.Attribute = .firstBaseline
+    ) -> NSStackView {
         let row = NSStackView(views: [leading, trailing])
         row.orientation = .horizontal
-        row.alignment = .firstBaseline
+        row.alignment = alignment
         row.distribution = .fill
         leading.setContentHuggingPriority(.defaultLow, for: .horizontal)
         trailing.setContentHuggingPriority(.required, for: .horizontal)
