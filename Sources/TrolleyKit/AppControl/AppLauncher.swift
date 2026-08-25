@@ -55,9 +55,21 @@ public struct AppLauncher {
     public var pollIntervalSeconds: TimeInterval
     public var sleeper: (TimeInterval) -> Void
 
+    /// Waits by running the run loop rather than blocking the thread.
+    ///
+    /// `NSRunningApplication`'s properties are KVO-backed and only refresh while
+    /// the run loop turns. Measured in a CLI process: polling behind
+    /// `Thread.sleep`, `isFinishedLaunching` stayed false for all 32 polls over
+    /// 8s even though the app was up and frontmost; pumping the run loop, it
+    /// went true on the 2nd poll (0.26s). Blocking here doesn't just waste
+    /// time -- it makes the launch look like it failed.
+    public static func pumpRunLoop(_ seconds: TimeInterval) {
+        RunLoop.current.run(until: Date().addingTimeInterval(seconds))
+    }
+
     public init(
         pollIntervalSeconds: TimeInterval = 0.25,
-        sleeper: @escaping (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+        sleeper: @escaping (TimeInterval) -> Void = AppLauncher.pumpRunLoop
     ) {
         self.pollIntervalSeconds = pollIntervalSeconds
         self.sleeper = sleeper
