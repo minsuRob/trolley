@@ -44,9 +44,17 @@ echo "==> 서명용 임시 키체인 준비"
 trolley_keychain_create
 echo "==> 앱 번들 조립"
 rm -rf "$DMGROOT"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 install -m 755 "$BINARY" "$APP/Contents/MacOS/trolley"
 sed "s/@VERSION@/$VERSION/g" Scripts/app/Info.plist > "$APP/Contents/Info.plist"
+
+# The icon is rendered by the binary we just built, from the same paths the
+# widget draws -- so the icon and the folder pet cannot drift apart.
+ICONSET="$DIST/trolley.iconset"
+rm -rf "$ICONSET"
+"$BINARY" export-icon --output "$ICONSET" >/dev/null
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/trolley.icns"
+rm -rf "$ICONSET"
 
 echo "==> 서명: $TROLLEY_SIGN_ID"
 # Hardened runtime and a timestamp are both prerequisites for notarization.
@@ -106,9 +114,42 @@ notarize "$ZIP" "앱" || true
 echo "==> dmg 생성"
 # The /Applications alias is what makes the window a drag target.
 ln -s /Applications "$DMGROOT/Applications"
+VOLUME="trolley $VERSION"
 DMG="$DIST/trolley-$VERSION.dmg"
-rm -f "$DMG"
-hdiutil create -volname "trolley $VERSION" -srcfolder "$DMGROOT" -ov -format UDZO "$DMG" >/dev/null
+STAGING_DMG="$DIST/.trolley-rw.dmg"
+rm -f "$DMG" "$STAGING_DMG"
+
+# Built read-write first: the window layout lives in the volume's .DS_Store, so
+# Finder has to be able to write to it before the image is compressed.
+hdiutil create -volname "$VOLUME" -srcfolder "$DMGROOT" -ov -format UDRW "$STAGING_DMG" >/dev/null
+# grep rather than the last line: hdiutil prints a tab-separated table whose
+# trailing line is not reliably the mount point, and an empty capture here fails
+# silently -- the volume icon simply went missing the first time.
+MOUNT=$(hdiutil attach "$STAGING_DMG" -nobrowse -noverify | grep -o '/Volumes/.*' | tail -1)
+if [ -z "$MOUNT" ] || [ ! -d "$MOUNT" ]; then
+    echo "error: dmg 마운트 지점을 찾지 못했습니다." >&2
+    exit 1
+fi
+
+# Cosmetic only: Finder scripting needs Automation permission, and a build on a
+# machine that has not granted it should still produce a working image.
+if ! osascript Scripts/dmg-layout.applescript "$VOLUME" >/dev/null 2>&1; then
+    echo "    창 배치 건너뜀: Finder 자동화 권한이 없습니다(기능에는 영향 없음)."
+fi
+
+# After the layout, never before: Finder deletes .VolumeIcon.icns while it works
+# on the window, so an icon written first silently disappears -- measured.
+cp "$APP/Contents/Resources/trolley.icns" "$MOUNT/.VolumeIcon.icns"
+if command -v SetFile >/dev/null 2>&1; then
+    SetFile -a C "$MOUNT"
+else
+    echo "    볼륨 아이콘 플래그 건너뜀: SetFile 이 없습니다."
+fi
+sync
+hdiutil detach "$MOUNT" >/dev/null 2>&1 || hdiutil detach "$MOUNT" -force >/dev/null 2>&1
+
+hdiutil convert "$STAGING_DMG" -format UDZO -imagekey zlib-level=9 -o "$DMG" >/dev/null
+rm -f "$STAGING_DMG"
 codesign --force --timestamp --keychain "$TROLLEY_KEYCHAIN" --sign "$TROLLEY_SIGN_ID" "$DMG"
 
 if notarize "$DMG" "dmg"; then
