@@ -44,17 +44,23 @@ struct McpCommand: ParsableCommand {
         // sourceless background run loop returns immediately (a 15s busy-spin),
         // while the NSRunningApplication KVO it exists for is now refreshed by
         // NSApp's own main run loop. A plain sleep is exactly right here.
+
+        // One queue, two owners: the widget's prompt box writes, `take_prompt`
+        // reads. Widget mode only -- headless has no box to type into.
+        let promptQueue = PromptQueue()
         let controller = StatusWidgetController(
             permissions: {
                 (SystemTrustChecker().isProcessTrusted(), CGPreflightScreenCaptureAccess())
             },
+            promptQueue: promptQueue,
             onQuit: {
                 log("trolley mcp: quitting (widget menu)")
                 Darwin.exit(0)
             }
         )
         let tools = makeTools(
-            launcher: AppLauncher(sleeper: { Thread.sleep(forTimeInterval: $0) })
+            launcher: AppLauncher(sleeper: { Thread.sleep(forTimeInterval: $0) }),
+            promptQueue: promptQueue
         )
         let server = MCPServer(provider: tools, observer: controller.observer)
 
@@ -102,7 +108,7 @@ struct McpCommand: ParsableCommand {
         thread.start()
     }
 
-    private func makeTools(launcher: AppLauncher) -> TrolleyTools {
+    private func makeTools(launcher: AppLauncher, promptQueue: PromptQueue? = nil) -> TrolleyTools {
         TrolleyTools(
             trustChecker: SystemTrustChecker(),
             locator: WorkspaceAppLocator(),
@@ -129,7 +135,8 @@ struct McpCommand: ParsableCommand {
                             isActive: app.isActive
                         )
                     }
-            }
+            },
+            promptQueue: promptQueue
         )
     }
 }

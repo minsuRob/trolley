@@ -57,16 +57,21 @@ public final class StatusWidgetController {
     private var badgeTimer: DispatchWorkItem?
     private let sessionStartedAt = Date()
     private let permissions: () -> (ax: Bool, screenRecording: Bool)
+    private let promptQueue: PromptQueue
     private let onQuit: () -> Void
 
+    /// - Parameter promptQueue: shared with the tool provider -- the panel's
+    ///   prompt box is the writer, `take_prompt` the reader.
     /// - Parameter onQuit: what "위젯 종료" does. Injected so this module never
     ///   decides how the process dies -- `trolley mcp` exits the same way it does
     ///   on stdin EOF.
     public init(
         permissions: @escaping () -> (ax: Bool, screenRecording: Bool),
+        promptQueue: PromptQueue = PromptQueue(),
         onQuit: @escaping () -> Void = { NSApplication.shared.terminate(nil) }
     ) {
         self.permissions = permissions
+        self.promptQueue = promptQueue
         self.onQuit = onQuit
 
         let size = Self.widgetSize
@@ -92,6 +97,17 @@ public final class StatusWidgetController {
 
         iconView.onClick = { [weak self] in self?.toggleActivityPanel() }
         iconView.onRightClick = { [weak self] event in self?.showMenu(for: event) }
+        activityPanel.onSubmitPrompt = { [weak self] text in
+            self?.submitPrompt(text)
+        }
+        // The agent drains from the MCP thread; without this the panel would go
+        // on listing prompts that have already been collected.
+        promptQueue.onChange = { [weak self] in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.activityPanel.refreshIfVisible(self.makePanelModel())
+            }
+        }
 
         NotificationCenter.default.addObserver(
             forName: NSWindow.didMoveNotification,
@@ -238,8 +254,15 @@ public final class StatusWidgetController {
             log: log,
             uptime: Date().timeIntervalSince(sessionStartedAt),
             axGranted: grants.ax,
-            screenRecordingGranted: grants.screenRecording
+            screenRecordingGranted: grants.screenRecording,
+            pendingPrompts: promptQueue.pendingPrompts
         )
+    }
+
+    /// Whitespace-only text is dropped by the queue, which is what makes a
+    /// stray ⏎ a no-op rather than a blank instruction to the agent.
+    private func submitPrompt(_ text: String) {
+        promptQueue.submit(text)
     }
 
     /// Quitting is the only way to make the widget go away. Hiding used to live

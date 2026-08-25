@@ -1,4 +1,5 @@
 import AppKit
+import TrolleyMCP
 
 /// Everything the activity panel renders, assembled by the widget controller.
 struct ActivityPanelModel {
@@ -6,6 +7,7 @@ struct ActivityPanelModel {
     let uptime: TimeInterval
     let axGranted: Bool
     let screenRecordingGranted: Bool
+    let pendingPrompts: [PromptQueue.Prompt]
 }
 
 /// Fixed column widths for the call rows. The panel is a fixed width, so
@@ -29,21 +31,57 @@ private enum Style {
     static let dot = NSFont.systemFont(ofSize: 9)
 }
 
-/// The click-to-open panel: session stats, permission dots, and the most
-/// recent tool calls. A child window of the widget panel, so it follows drags.
-final class ActivityPanelController {
+/// The prompt box. Clicking it is the one moment the widget does take focus:
+/// macOS routes hardware keystrokes to the *active* application, so a panel
+/// that is key while the app stays inactive receives nothing -- what the user
+/// types would go to whatever app is in front. Activating on the click is what
+/// makes typing here work at all; `releaseFocus` hands the keyboard back as
+/// soon as the prompt is committed or abandoned.
+private final class PromptTextField: NSTextField {
+    /// Same reason as the widget's own view: the panel belongs to an inactive
+    /// app, so without this the click that should put the caret here is spent
+    /// on activation instead.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+        super.mouseDown(with: event)
+        // Activation lands asynchronously. A field editor installed before the
+        // app went active can end up without focus -- the click then looks like
+        // it worked (the panel is up, the caret blinks nowhere) and the typing
+        // goes to the app the user came from. Re-assert on the next turn.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let window = self.window else { return }
+            if window.firstResponder !== window.fieldEditor(false, for: self) {
+                window.makeFirstResponder(self)
+            }
+        }
+    }
+}
+
+/// The click-to-open panel: session stats, permission dots, the most recent
+/// tool calls, and a box for handing the agent a prompt. A child window of the
+/// widget panel, so it follows drags.
+final class ActivityPanelController: NSObject, NSTextFieldDelegate {
     private static let width: CGFloat = 360
     private static let inset: CGFloat = 12
     private static var contentWidth: CGFloat { width - inset * 2 }
     private static let maxRows = 8
+    /// Enough to see the queue is real without letting it push the panel off
+    /// screen; the count label carries the rest.
+    private static let maxPendingRows = 3
+
+    /// The user committed a prompt. The widget controller owns the queue.
+    var onSubmitPrompt: ((String) -> Void)?
 
     private let panel: NSPanel
     private let widgetPanel: NSPanel
     private let stack = NSStackView()
 
     // The panel refreshes on every tool call, so its chrome is built once and
-    // only its text is updated -- rebuilding every view on each refresh was
-    // what made the old panel jump around as rows came and went.
+    // only its text is updated. Rebuilding would throw away both the prompt the
+    // user is halfway through typing and the field's first-responder status.
     private let uptimeLabel = ActivityPanelController.makeLabel(Style.mono, .secondaryLabelColor)
     private let statsLabel = ActivityPanelController.makeLabel(Style.body, .secondaryLabelColor)
     // Dot and name are separate labels rather than one attributed string: a
@@ -56,6 +94,9 @@ final class ActivityPanelController {
     private let screenLabel = ActivityPanelController.makeLabel(Style.body, .secondaryLabelColor)
     private let callsStack = NSStackView()
     private let emptyLabel = ActivityPanelController.makeLabel(Style.body, .tertiaryLabelColor)
+    private let pendingCountLabel = ActivityPanelController.makeLabel(Style.caption, .secondaryLabelColor)
+    private let pendingStack = NSStackView()
+    private let promptField = PromptTextField()
 
     private let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -67,11 +108,16 @@ final class ActivityPanelController {
         self.widgetPanel = widgetPanel
 
         panel = {
-            final class NonKeyPanel: NSPanel {
-                override var canBecomeKey: Bool { false }
+            /// Key, unlike the widget itself: the prompt field needs keystrokes.
+            /// `.nonactivatingPanel` plus `becomesKeyOnlyIfNeeded` keeps that
+            /// narrow -- opening the panel, and clicking anywhere in it that is
+            /// not the prompt field, leaves the app trolley is automating in
+            /// front. Only `PromptTextField` takes focus, and gives it back.
+            final class PromptablePanel: NSPanel {
+                override var canBecomeKey: Bool { true }
                 override var canBecomeMain: Bool { false }
             }
-            return NonKeyPanel(
+            return PromptablePanel(
                 contentRect: NSRect(x: 0, y: 0, width: Self.width, height: 100),
                 styleMask: [.borderless, .nonactivatingPanel],
                 backing: .buffered,
@@ -80,6 +126,8 @@ final class ActivityPanelController {
         }()
         panel.isFloatingPanel = true
         panel.level = .floating
+        panel.becomesKeyOnlyIfNeeded = true
+        panel.hidesOnDeactivate = false
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = true
@@ -109,6 +157,13 @@ final class ActivityPanelController {
             stack.widthAnchor.constraint(equalToConstant: Self.width)
         ])
         panel.contentView = effect
+        // Opening the panel must not put the caret in the prompt field: AppKit
+        // would otherwise adopt it as the initial first responder and the panel
+        // would open holding the keyboard, which is exactly what the widget
+        // promises never to do.
+        panel.initialFirstResponder = nil
+
+        super.init()
         buildChrome()
     }
 
@@ -121,7 +176,10 @@ final class ActivityPanelController {
             update(model)
             position()
             widgetPanel.addChildWindow(panel, ordered: .above)
+            // Not makeKey: the panel opens without focus, and only the prompt
+            // field takes it, when clicked.
             panel.orderFront(nil)
+            panel.makeFirstResponder(nil)
         }
     }
 
@@ -132,8 +190,18 @@ final class ActivityPanelController {
     }
 
     func hide() {
+        releaseFocus()
         widgetPanel.removeChildWindow(panel)
         panel.orderOut(nil)
+    }
+
+    /// Undoes what clicking the prompt field did: drop the caret, then let the
+    /// app the user was actually working in come back to the front.
+    private func releaseFocus() {
+        panel.makeFirstResponder(nil)
+        if NSApp.isActive {
+            NSApp.deactivate()
+        }
     }
 
     // MARK: - Chrome
@@ -162,6 +230,35 @@ final class ActivityPanelController {
         stack.addArrangedSubview(callsStack)
         emptyLabel.stringValue = "아직 툴 호출이 없습니다"
         stack.addArrangedSubview(emptyLabel)
+
+        stack.addArrangedSubview(separator())
+
+        let promptTitle = Self.makeLabel(Style.body, .labelColor)
+        promptTitle.stringValue = "프롬프트"
+        stack.addArrangedSubview(headerRow(promptTitle, pendingCountLabel))
+
+        pendingStack.orientation = .vertical
+        pendingStack.alignment = .leading
+        pendingStack.spacing = 2
+        stack.addArrangedSubview(pendingStack)
+
+        promptField.font = Style.body
+        promptField.placeholderString = "에이전트에게 전할 말…"
+        promptField.bezelStyle = .roundedBezel
+        promptField.isBezeled = true
+        promptField.focusRingType = .default
+        promptField.delegate = self
+        promptField.target = self
+        promptField.action = #selector(promptCommitted)
+        // Committing only on ⏎ -- clicking away from a half-typed prompt must
+        // not queue it.
+        promptField.cell?.sendsActionOnEndEditing = false
+        stack.addArrangedSubview(promptField)
+        promptField.widthAnchor.constraint(equalToConstant: Self.contentWidth).isActive = true
+
+        let hint = Self.makeLabel(Style.caption, .tertiaryLabelColor)
+        hint.stringValue = "⏎ 로 대기열에 넣으면 에이전트가 take_prompt로 가져갑니다"
+        stack.addArrangedSubview(hint)
     }
 
     private func permissionPair(_ dot: NSTextField, _ name: NSTextField) -> NSStackView {
@@ -204,6 +301,13 @@ final class ActivityPanelController {
 
         replaceRows(of: callsStack, with: model.log.entries.prefix(Self.maxRows).map(callRow))
         emptyLabel.isHidden = !model.log.entries.isEmpty
+
+        let pending = model.pendingPrompts
+        pendingCountLabel.stringValue = pending.isEmpty ? "대기 없음" : "대기 \(pending.count)건"
+        replaceRows(
+            of: pendingStack,
+            with: pending.prefix(Self.maxPendingRows).map(pendingRow)
+        )
 
         panel.setContentSize(NSSize(width: Self.width, height: stack.fittingSize.height))
     }
@@ -249,6 +353,14 @@ final class ActivityPanelController {
         return row
     }
 
+    private func pendingRow(_ prompt: PromptQueue.Prompt) -> NSView {
+        let label = Self.makeLabel(Style.caption, .secondaryLabelColor)
+        // Newlines would make one prompt eat several rows' worth of height.
+        label.stringValue = "• " + prompt.text.replacingOccurrences(of: "\n", with: " ")
+        label.widthAnchor.constraint(equalToConstant: Self.contentWidth).isActive = true
+        return label
+    }
+
     private static func makeLabel(_ font: NSFont, _ color: NSColor) -> NSTextField {
         let label = NSTextField(labelWithString: "")
         label.font = font
@@ -256,6 +368,29 @@ final class ActivityPanelController {
         label.lineBreakMode = .byTruncatingTail
         label.cell?.truncatesLastVisibleLine = true
         return label
+    }
+
+    // MARK: - Prompt box
+
+    /// ⏎ means "take it from here", so the keyboard goes back to whatever the
+    /// user was doing rather than staying parked in the widget.
+    @objc private func promptCommitted() {
+        let text = promptField.stringValue
+        promptField.stringValue = ""
+        releaseFocus()
+        onSubmitPrompt?(text)
+    }
+
+    /// Escape gives the field back: clear a half-typed prompt, then close.
+    func control(
+        _ control: NSControl,
+        textView: NSTextView,
+        doCommandBy commandSelector: Selector
+    ) -> Bool {
+        guard commandSelector == #selector(NSResponder.cancelOperation(_:)) else { return false }
+        promptField.stringValue = ""
+        hide()
+        return true
     }
 
     // MARK: - Placement
