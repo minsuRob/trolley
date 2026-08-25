@@ -121,6 +121,8 @@ rm -f "$DMG" "$STAGING_DMG"
 
 # Built read-write first: the window layout lives in the volume's .DS_Store, so
 # Finder has to be able to write to it before the image is compressed.
+# Detach a leftover of the same name first, so this image gets the plain name.
+hdiutil detach "/Volumes/$VOLUME" -force >/dev/null 2>&1 || true
 hdiutil create -volname "$VOLUME" -srcfolder "$DMGROOT" -ov -format UDRW "$STAGING_DMG" >/dev/null
 # grep rather than the last line: hdiutil prints a tab-separated table whose
 # trailing line is not reliably the mount point, and an empty capture here fails
@@ -131,10 +133,16 @@ if [ -z "$MOUNT" ] || [ ! -d "$MOUNT" ]; then
     exit 1
 fi
 
+# The name Finder is told must come from the mount point, not from what we asked
+# for. A volume of the same name already attached -- a leftover from an earlier
+# build or a manual check -- makes this one mount as "trolley 0.1.0 1", and
+# scripting the requested name then decorates the stale volume instead. Measured:
+# the layout silently went missing exactly that way.
+VOLNAME=$(basename "$MOUNT")
 # Cosmetic only: Finder scripting needs Automation permission, and a build on a
 # machine that has not granted it should still produce a working image.
-if ! osascript Scripts/dmg-layout.applescript "$VOLUME" >/dev/null 2>&1; then
-    echo "    창 배치 건너뜀: Finder 자동화 권한이 없습니다(기능에는 영향 없음)."
+if ! osascript Scripts/dmg-layout.applescript "$VOLNAME" >/dev/null 2>&1; then
+    echo "    창 배치 건너뜀: Finder 자동화 권한이 없거나 실패했습니다(기능에는 영향 없음)."
 fi
 
 # After the layout, never before: Finder deletes .VolumeIcon.icns while it works
