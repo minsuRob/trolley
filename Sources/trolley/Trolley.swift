@@ -7,6 +7,7 @@ struct Trolley: ParsableCommand {
         abstract: "AX-tree grounded macOS UI automation (no screenshots/vision).",
         subcommands: [
             CheckPermissionsCommand.self,
+            McpCommand.self,
             DumpTreeCommand.self,
             RunCommand.self,
             ClickCommand.self,
