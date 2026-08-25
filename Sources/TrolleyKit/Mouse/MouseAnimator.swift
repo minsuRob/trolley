@@ -7,7 +7,7 @@ public protocol MouseEventPosting {
     func currentLocation() -> CGPoint
     /// Posts a `.mouseMoved` event.
     func move(to point: CGPoint)
-    /// Posts a left down/up pair at the point.
+    /// Posts a left down/up pair at the point, held briefly like a real click.
     func click(at point: CGPoint)
 }
 
@@ -39,6 +39,12 @@ public struct CGMouseEventPoster: MouseEventPosting {
         down?.setIntegerValueField(.mouseEventClickState, value: 1)
         up?.setIntegerValueField(.mouseEventClickState, value: 1)
         down?.post(tap: .cghidEventTap)
+        // A human holds a button down for tens of milliseconds. Releasing in
+        // the same instant loses the click in any view that opens a mouse
+        // tracking loop on mouseDown -- an AppKit text field, measurably, whose
+        // loop then waits for an up that was already delivered and wedges the
+        // app's main thread. Cheap insurance on every click.
+        Thread.sleep(forTimeInterval: 0.04)
         up?.post(tap: .cghidEventTap)
     }
 }
