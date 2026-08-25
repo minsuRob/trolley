@@ -1,15 +1,20 @@
 import AppKit
 import Foundation
 import TrolleyKit
+import TrolleyWidget
 
-/// What a double-click in Finder does: open the setup window.
+/// The app, as opposed to the CLI: a folder pet that stays on screen, with the
+/// setup window behind it.
 ///
-/// The bundle exists so trolley can be dragged to /Applications, but a CLI
-/// launched from Finder has nowhere to print -- without this the icon would just
-/// blink and look broken.
+/// The widget used to belong to `trolley mcp`, so it only existed while a client
+/// held the connection -- it never appeared on its own, and it blinked in and out
+/// as `claude mcp list` spawned servers to health-check them. Owning it here is
+/// what makes "always visible" true; servers now report their activity across
+/// with `ActivityBridge`.
 enum WelcomeFlow {
-    /// Held for the process's lifetime; the window owns the run loop from here.
-    private static var controller: SetupWindowController?
+    private static var widget: StatusWidgetController?
+    private static var setup: SetupWindowController?
+    private static var delegate: AppDelegate?
 
     /// launchd sets `__CFBundleIdentifier` to the identifier of the bundle it
     /// opened. Merely being set is not enough to go on: Terminal exports its own
@@ -27,14 +32,61 @@ enum WelcomeFlow {
         return environment["__CFBundleIdentifier"] == bundleIdentifier
     }
 
-    static func run() {
+    /// - Parameter alwaysShowSetup: true when someone asked for the window by
+    ///   name (`trolley setup`), where opening nothing would look broken.
+    static func run(alwaysShowSetup: Bool = false) {
         let app = NSApplication.shared
-        // .regular so the window can come forward on its own; the MCP server
-        // picks .accessory for itself and never reaches this path.
-        app.setActivationPolicy(.regular)
-        let controller = SetupWindowController()
-        Self.controller = controller
+        // .accessory: a pet on screen, not an app in the Dock. Windows still
+        // open and come forward.
+        app.setActivationPolicy(.accessory)
+
+        let controller = StatusWidgetController(
+            permissions: {
+                (SystemTrustChecker().isProcessTrusted(), CGPreflightScreenCaptureAccess())
+            },
+            onQuit: { NSApp.terminate(nil) },
+            onOpenSettings: { openSetup(force: true) }
+        )
+        widget = controller
         controller.show()
+
+        ActivityBridge.observe(
+            onStarted: { tool in controller.record(started: tool) },
+            onFinished: { tool, isError, duration in
+                controller.record(finished: tool, isError: isError, duration: duration)
+            }
+        )
+
+        let appDelegate = AppDelegate()
+        delegate = appDelegate
+        app.delegate = appDelegate
+
+        // Only in the way when something actually needs attention; otherwise the
+        // pet is the whole interface.
+        openSetup(force: alwaysShowSetup)
         app.run()
+    }
+
+    /// - Parameter force: opened from the menu, so show it even when nothing is
+    ///   outstanding.
+    static func openSetup(force: Bool) {
+        if let existing = setup, existing.isVisible {
+            existing.bringToFront()
+            return
+        }
+        if !force && SetupWindowController.isEverythingReady() { return }
+
+        let controller = SetupWindowController()
+        setup = controller
+        controller.show()
+    }
+}
+
+/// Re-opening the app from Finder brings the setup window back -- with no Dock
+/// icon there is nowhere else for a second launch to go.
+private final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        WelcomeFlow.openSetup(force: true)
+        return true
     }
 }

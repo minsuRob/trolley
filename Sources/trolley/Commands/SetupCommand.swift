@@ -8,6 +8,6 @@ struct SetupCommand: ParsableCommand {
     )
 
     func run() throws {
-        WelcomeFlow.run()
+        WelcomeFlow.run(alwaysShowSetup: true)
     }
 }

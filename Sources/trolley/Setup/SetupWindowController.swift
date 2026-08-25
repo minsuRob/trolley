@@ -17,6 +17,7 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     private let mcpRow = SetupRow(title: "Claude Code 연결")
     private let pathLabel = NSTextField(labelWithString: "")
     private var refreshTimer: Timer?
+    private var closing = false
 
     /// Both cached because they shell out; the timer must not run them twice a
     /// second. Re-checked on a slower beat so registering from a terminal still
@@ -55,9 +56,27 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         }
     }
 
+    var isVisible: Bool { window.isVisible }
+
+    func bringToFront() {
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Closing this window does not end the app: the widget outlives it, and the
+    /// widget's menu is how the window comes back.
     func windowWillClose(_ notification: Notification) {
         refreshTimer?.invalidate()
-        NSApp.terminate(nil)
+        refreshTimer = nil
+    }
+
+    /// What "설정이 끝났다" means: nothing left that the window is asking for.
+    /// Claude Code is deliberately not part of it -- it is optional, and waiting
+    /// on it would keep the window open forever for someone who never wants it.
+    static func isEverythingReady() -> Bool {
+        InstallLocation.detect(bundlePath: Bundle.main.bundleURL.path) == .applications
+            && SystemTrustChecker().isProcessTrusted()
+            && CGPreflightScreenCaptureAccess()
     }
 
     // MARK: - Layout
@@ -132,6 +151,18 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         )
 
         refreshMCPRow()
+        closeWhenReady()
+    }
+
+    /// Steps aside once everything it asks for is done, rather than making the
+    /// user dismiss a window full of green dots. The delay is so the last dot is
+    /// visibly green before it goes.
+    private func closeWhenReady() {
+        guard Self.isEverythingReady(), !closing else { return }
+        closing = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            self?.window.performClose(nil)
+        }
     }
 
     /// Optional by design: trolley works as a CLI without it, and someone who
