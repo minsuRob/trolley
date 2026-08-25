@@ -42,6 +42,8 @@ public struct MCPServer {
     let readLine: () -> String?
     let writeLine: (String) -> Void
     let logLine: (String) -> Void
+    let observer: ToolCallObserver
+    let now: () -> Date
 
     public init(
         provider: ToolProviding,
@@ -52,12 +54,16 @@ public struct MCPServer {
         },
         logLine: @escaping (String) -> Void = { line in
             FileHandle.standardError.write(Data((line + "\n").utf8))
-        }
+        },
+        observer: ToolCallObserver = ToolCallObserver(),
+        now: @escaping () -> Date = { Date() }
     ) {
         self.provider = provider
         self.readLine = readLine
         self.writeLine = writeLine
         self.logLine = logLine
+        self.observer = observer
+        self.now = now
     }
 
     /// Blocks until stdin reaches EOF, which is how MCP clients shut a stdio
@@ -134,21 +140,29 @@ public struct MCPServer {
 
     private func toolCallResult(id: RequestID, params: JSONValue?) -> RPCResponse {
         guard let name = params?["name"]?.stringValue else {
+            // No tool ran, so the observer hears nothing.
             return .failure(id: id, code: .invalidParams, message: "tools/call requires a \"name\"")
         }
         let arguments = params?["arguments"] ?? .object([:])
 
+        observer.toolCallStarted(name)
+        let startedAt = now()
+        let payload: JSONValue
+        let isError: Bool
         do {
-            let value = try provider.call(name: name, arguments: arguments)
-            return .result(id: id, value: Self.toolContent(value, isError: false))
+            payload = try provider.call(name: name, arguments: arguments)
+            isError = false
         } catch let error as ToolError {
             logLine("tool \(name) failed: \(error.code.rawValue) \(error.message)")
-            return .result(id: id, value: Self.toolContent(error.jsonValue, isError: true))
+            payload = error.jsonValue
+            isError = true
         } catch {
             logLine("tool \(name) threw: \(error)")
-            let fallback = ToolError(.actionFailed, "\(error)")
-            return .result(id: id, value: Self.toolContent(fallback.jsonValue, isError: true))
+            payload = ToolError(.actionFailed, "\(error)").jsonValue
+            isError = true
         }
+        observer.toolCallFinished(name, isError, now().timeIntervalSince(startedAt))
+        return .result(id: id, value: Self.toolContent(payload, isError: isError))
     }
 
     /// A tool that needs to attach non-text content blocks (an image, say) puts

@@ -111,6 +111,92 @@ final class MCPServerTests: XCTestCase {
         XCTAssertTrue(exchange(["", "   "]).isEmpty)
     }
 
+    // MARK: - Tool-call observer
+
+    private struct ObservedCall: Equatable {
+        let event: String
+        let name: String
+        let isError: Bool
+    }
+
+    private func observe(
+        _ lines: [String],
+        provider: ToolProviding = StubToolProvider(),
+        clockStepSeconds: TimeInterval = 1.5
+    ) -> (events: [ObservedCall], durations: [TimeInterval]) {
+        var events: [ObservedCall] = []
+        var durations: [TimeInterval] = []
+        var tick: TimeInterval = 0
+        var pending = lines
+        MCPServer(
+            provider: provider,
+            readLine: { pending.isEmpty ? nil : pending.removeFirst() },
+            writeLine: { _ in },
+            logLine: { _ in },
+            observer: ToolCallObserver(
+                toolCallStarted: { name in
+                    events.append(ObservedCall(event: "started", name: name, isError: false))
+                },
+                toolCallFinished: { name, isError, duration in
+                    events.append(ObservedCall(event: "finished", name: name, isError: isError))
+                    durations.append(duration)
+                }
+            ),
+            now: {
+                tick += clockStepSeconds
+                return Date(timeIntervalSinceReferenceDate: tick)
+            }
+        ).run()
+        return (events, durations)
+    }
+
+    func testObserverSeesStartThenFinishAroundASuccessfulCall() {
+        let (events, durations) = observe([
+            #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#
+        ])
+
+        XCTAssertEqual(events, [
+            ObservedCall(event: "started", name: "echo", isError: false),
+            ObservedCall(event: "finished", name: "echo", isError: false)
+        ])
+        // The scripted clock advances 1.5s per read: one tick at start, one at finish.
+        XCTAssertEqual(durations, [1.5])
+    }
+
+    func testObserverSeesToolErrorsAsErrors() {
+        let provider = StubToolProvider(handler: { _, _ in
+            throw ToolError(.elementNotFound, "nope")
+        })
+        let (events, _) = observe([
+            #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo"}}"#
+        ], provider: provider)
+
+        XCTAssertEqual(events.last, ObservedCall(event: "finished", name: "echo", isError: true))
+    }
+
+    func testObserverSeesUnexpectedErrorsAsErrors() {
+        struct Boom: Error {}
+        let provider = StubToolProvider(handler: { _, _ in throw Boom() })
+        let (events, _) = observe([
+            #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo"}}"#
+        ], provider: provider)
+
+        XCTAssertEqual(events.last, ObservedCall(event: "finished", name: "echo", isError: true))
+    }
+
+    /// Protocol traffic that runs no tool must stay invisible to the observer,
+    /// or the widget would flash "working" for pings.
+    func testObserverIgnoresNonToolTrafficAndNamelessCalls() {
+        let (events, _) = observe([
+            #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            #"{"jsonrpc":"2.0","id":2,"method":"ping"}"#,
+            #"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#,
+            #"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{}}"#
+        ])
+
+        XCTAssertTrue(events.isEmpty)
+    }
+
     /// The reserved key lets a tool attach an image without the base64 landing
     /// in the pretty-printed text the model reads.
     func testExtraContentBlocksRideAfterTheTextBlockAndLeaveThePayload() throws {
