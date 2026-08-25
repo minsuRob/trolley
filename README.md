@@ -46,20 +46,30 @@ MCP 클라이언트가 trolley의 AX 원시 동작을 직접 호출할 수 있�
 
 ### 설치
 
-`trolley-<버전>.dmg`를 열고 **trolley.app을 Applications로 끌어다 놓는다.** 관리자 암호는
+`trolley-<버전>.dmg`를 열고 **trolley를 Applications로 끌어다 놓는다.** 관리자 암호는
 필요 없다 — `/Applications`는 admin 그룹이 쓸 수 있다.
 
-앱을 더블클릭하면 권한 상태와 함께 붙여넣을 명령을 보여준다. 터미널에서 직접 해도 된다.
+그다음 앱을 실행하면 설정 창이 뜬다. 준비돼야 할 네 가지를 상태와 함께 보여주고, 각각
+옆의 버튼이 그 자리에서 처리한다. 터미널로 할 일은 없다.
 
-```sh
-/Applications/trolley.app/Contents/MacOS/trolley check-permissions --prompt
-claude mcp add trolley -- /Applications/trolley.app/Contents/MacOS/trolley mcp
-```
+| 항목 | 창이 하는 일 |
+| --- | --- |
+| 설치 위치 | 디스크 이미지나 다른 폴더에서 실행 중이면 경고하고 **Applications로 옮긴 뒤 다시 연다** |
+| 손쉬운 사용 | 시스템 프롬프트를 띄우고 해당 설정 화면을 연다 |
+| 화면 기록 | 같은 방식. `screenshot` 툴에만 필요하다 |
+| Claude Code 연결 | `claude mcp add`를 앱이 직접 실행한다. `claude`를 못 찾으면 명령을 복사해준다 |
+
+권한은 시스템 설정에서 켜지므로 창이 1.5초마다 다시 확인해 상태를 갱신한다.
+터미널에서 같은 창을 열려면 `trolley setup`.
+
+**설치 위치를 가장 먼저 확인하는 이유.** 디스크 이미지에서 그대로 실행하면 경로가
+`/Volumes/...`가 되는데, 접근성·화면 기록 권한(TCC)도 MCP 등록도 모두 그 경로에 걸린다.
+이미지를 꺼내는 순간 전부 무효가 된다.
 
 **CLI인데 왜 앱 번들인가.** 셋 다 이유가 있다.
 
-- 접근성·화면 기록 권한(TCC)은 **실행 파일의 절대 경로**에 걸린다. `/Applications`에 놓인
-  번들은 그 경로가 고정이고, 시스템 설정에도 맨 경로 대신 이름과 아이콘으로 뜬다.
+- TCC는 **실행 파일의 절대 경로**에 걸린다. `/Applications`에 놓인 번들은 그 경로가
+  고정이고, 시스템 설정에도 맨 경로 대신 이름과 아이콘으로 뜬다.
 - `/Applications`는 `drwxrwxr-x root:admin`이라 설치도, 이후 `trolley update`도 암호 없이
   끝난다. 원자적 교체에는 파일이 아니라 그 **디렉터리** 쓰기 권한이 필요하다.
 - flat 패키지(`.pkg`)는 Developer ID **Installer** 인증서 없이는 서명할 수 없고, macOS는
@@ -103,8 +113,16 @@ trolley update --check   # 확인만
 
 | 산출물 | 용도 |
 | --- | --- |
-| `trolley-<버전>.dmg` | 배포용. `trolley.app` + `/Applications` 별칭 |
+| `trolley-<버전>.dmg` | 배포용. `trolley.app` + `/Applications` 별칭, 창 배치와 볼륨 아이콘 포함 |
 | `trolley-app.zip` | `trolley update` 가 받아가는 서명된 번들 |
+
+아이콘은 **위젯이 그리는 폴더 그림에서 빌드 때 렌더링한다**(`trolley export-icon` →
+`iconutil`). 체크인된 아트가 아니라서 아이콘과 폴더 펫이 갈라질 수 없다.
+
+dmg 창 배치(아이콘 위치, 창 크기)는 볼륨의 `.DS_Store`에 들어가고 그건 Finder만 쓸 수
+있어서 AppleScript로 시킨다. Finder 자동화 권한이 없으면 배치를 건너뛰고 기능은 그대로인
+이미지를 낸다. **볼륨 아이콘은 반드시 배치 다음에 넣는다** — Finder가 창을 만지는 동안
+`.VolumeIcon.icns`를 지워버려서, 먼저 넣으면 조용히 사라진다.
 
 서명 자산은 MAKi 데스크톱 릴리스가 쓰는 것과 같은 SSM 파라미터
 (`/front/master/MAC_*`, `/front/master/APPLE_*`)에서 가져온다.
