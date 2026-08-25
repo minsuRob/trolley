@@ -19,7 +19,7 @@ struct Trolley: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "trolley",
         abstract: "AX-tree grounded macOS UI automation (no screenshots/vision).",
-        version: TrolleyVersion.current,
+        version: TrolleyVersion.display,
         subcommands: [
             CheckPermissionsCommand.self,
             McpCommand.self,

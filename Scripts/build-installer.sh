@@ -42,7 +42,13 @@ if [ -z "$VERSION" ]; then
     echo "error: Sources/TrolleyKit/Version.swift에서 버전을 읽지 못했습니다." >&2
     exit 1
 fi
-echo "==> trolley $VERSION"
+# Stamped into the bundle so a running app can say exactly what it was built
+# from. A dirty tree is marked: the commit alone would be a lie about it.
+COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+    COMMIT="$COMMIT-dirty"
+fi
+echo "==> trolley $VERSION ($COMMIT)"
 
 # --- 1. Universal release build ------------------------------------------------
 echo "==> 유니버설 빌드 (arm64 + x86_64)"
@@ -57,7 +63,8 @@ echo "==> 앱 번들 조립"
 rm -rf "$DMGROOT"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 install -m 755 "$BINARY" "$APP/Contents/MacOS/trolley"
-sed "s/@VERSION@/$VERSION/g" Scripts/app/Info.plist > "$APP/Contents/Info.plist"
+sed -e "s/@VERSION@/$VERSION/g" -e "s/@COMMIT@/$COMMIT/g" \
+    Scripts/app/Info.plist > "$APP/Contents/Info.plist"
 
 # The icon is rendered by the binary we just built, from the same paths the
 # widget draws -- so the icon and the folder pet cannot drift apart.

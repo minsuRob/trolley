@@ -64,13 +64,14 @@ enum WelcomeFlow {
     }
 
     /// The only way to open the window after setup is done: 펫 우클릭 → 설정 열기.
+    ///
+    /// One controller for the life of the app. Building a fresh one per open
+    /// dropped the previous one, and a window that has already released itself
+    /// on close takes the process down with it when anything touches it again.
     static func openSetup() {
-        if let existing = setup, existing.isVisible {
-            existing.bringToFront()
-            return
+        if setup == nil {
+            setup = SetupWindowController()
         }
-        let controller = SetupWindowController()
-        setup = controller
-        controller.show()
+        setup?.show()
     }
 }

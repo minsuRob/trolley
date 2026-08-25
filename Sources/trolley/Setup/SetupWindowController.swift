@@ -38,7 +38,12 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         )
         super.init()
 
-        window.title = "trolley \(TrolleyVersion.current)"
+        window.title = "trolley \(TrolleyVersion.display)"
+        // NSWindow releases itself on close by default, which under ARC leaves
+        // this controller holding freed memory -- reopening then crashed the
+        // whole app, pet included, inside `isVisible`. The window's lifetime
+        // belongs to this controller.
+        window.isReleasedWhenClosed = false
         window.delegate = self
         window.center()
         window.contentView = makeContentView()
@@ -47,6 +52,8 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     func show() {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        // Reopened windows come back through here, so never stack a second timer.
+        refreshTimer?.invalidate()
         refresh()
         // Permissions are granted in System Settings, in another app -- polling
         // is how the window notices.

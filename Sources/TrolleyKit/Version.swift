@@ -26,4 +26,20 @@ public enum TrolleyVersion {
 
     /// GitHub rejects API requests without one.
     public static var userAgent: String { "trolley/\(current)" }
+
+    /// The commit this bundle was built from, stamped into Info.plist by
+    /// `Scripts/build-installer.sh`. Absent from a bare `swift build`, which has
+    /// no Info.plist to read -- and absent is the honest answer there, since such
+    /// a binary is whatever the working tree happened to hold.
+    public static var commit: String? {
+        guard let value = Bundle.main.infoDictionary?["TrolleyCommit"] as? String,
+              !value.isEmpty, !value.hasPrefix("@") else { return nil }
+        return value
+    }
+
+    /// Version as people should see it: with the commit when we know it.
+    public static var display: String {
+        guard let commit else { return current }
+        return "\(current) (\(commit))"
+    }
 }
