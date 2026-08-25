@@ -1,24 +1,26 @@
 #!/bin/bash
 #
-# Builds dist/trolley-<version>.pkg -- the double-clickable installer -- plus
-# dist/trolley-universal, the signed binary `trolley update` downloads.
+# Builds dist/trolley-<version>.dmg -- drag trolley.app to /Applications -- plus
+# dist/trolley-app.zip, the archive `trolley update` downloads.
 #
-# The install path is fixed at /usr/local/trolley/bin/trolley on purpose:
-# Accessibility and Screen Recording grants are keyed to the executable path, so
-# a moving or versioned path would make users re-approve on every update.
+# Why an app bundle for a CLI: a flat package cannot be signed without a
+# Developer ID *Installer* certificate, which this team does not have, and macOS
+# refuses to open unsigned ones. Measured: productsign rejects the Application
+# identity outright, and an unsigned pkg comes back Invalid from notarytool both
+# bare and nested inside a signed dmg. Bundles and disk images sign with the
+# certificate we do have.
 #
-# Signing reuses the Developer ID Application certificate the MAKi desktop
-# release already ships with, pulled from the same SSM parameters. See
-# Scripts/signing-keychain.sh.
+# The bundle also lands in a directory the admin group can write, so both the
+# install and every later `trolley update` finish without an admin prompt -- and
+# TCC lists the app by name instead of showing a bare executable path.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 source Scripts/signing-keychain.sh
 
-PREFIX=/usr/local/trolley
-IDENTIFIER=ink.markhub.trolley
 DIST=dist
-STAGE="$DIST/root"
+DMGROOT="$DIST/dmgroot"
+APP="$DMGROOT/trolley.app"
 
 # Installed before the keychain is touched: the restore has to run even if the
 # build dies halfway, or the user's keychain search list keeps the leftovers.
@@ -37,21 +39,27 @@ swift build -c release --arch arm64 --arch x86_64
 BINARY=.build/apple/Products/Release/trolley
 [ -f "$BINARY" ] || { echo "error: $BINARY 가 없습니다." >&2; exit 1; }
 
-# --- 2. Sign -------------------------------------------------------------------
+# --- 2. Assemble and sign the bundle -------------------------------------------
 echo "==> 서명용 임시 키체인 준비"
 trolley_keychain_create
+echo "==> 앱 번들 조립"
+rm -rf "$DMGROOT"
+mkdir -p "$APP/Contents/MacOS"
+install -m 755 "$BINARY" "$APP/Contents/MacOS/trolley"
+sed "s/@VERSION@/$VERSION/g" Scripts/app/Info.plist > "$APP/Contents/Info.plist"
+
 echo "==> 서명: $TROLLEY_SIGN_ID"
 # Hardened runtime and a timestamp are both prerequisites for notarization.
+# Signing the bundle signs its executable in place -- the code directory hashes
+# Info.plist, which is why a binary signed on its own can never be dropped into
+# a bundle later.
 codesign --force --options runtime --timestamp \
-    --keychain "$TROLLEY_KEYCHAIN" --sign "$TROLLEY_SIGN_ID" "$BINARY"
-codesign --verify --strict --verbose=2 "$BINARY"
-TEAM=$(codesign -dv --verbose=4 "$BINARY" 2>&1 | sed -n 's/^TeamIdentifier=//p')
+    --keychain "$TROLLEY_KEYCHAIN" --sign "$TROLLEY_SIGN_ID" "$APP"
+codesign --verify --deep --strict --verbose=2 "$APP"
+TEAM=$(codesign -dv --verbose=4 "$APP" 2>&1 | sed -n 's/^TeamIdentifier=//p')
 echo "==> TeamIdentifier=$TEAM"
 
-# --- 3. Notarize the binary ----------------------------------------------------
-# The updater downloads this file directly, so it is worth notarizing on its own.
-# A bare executable cannot be stapled -- there is nowhere to attach the ticket --
-# so Gatekeeper checks it online when it checks at all.
+# --- 3. Notarize --------------------------------------------------------------
 APPLE_ID="${APPLE_ID:-$(trolley_ssm APPLE_ID)}"
 APPLE_TEAM_ID="${APPLE_TEAM_ID:-$(trolley_ssm APPLE_TEAM_ID)}"
 APPLE_APP_SPECIFIC_PASSWORD="${APPLE_APP_SPECIFIC_PASSWORD:-$(trolley_ssm APPLE_APP_SPECIFIC_PASSWORD)}"
@@ -60,7 +68,7 @@ notarize() {
     local artifact="$1" label="$2"
     if [ -z "$APPLE_ID" ] || [ -z "$APPLE_TEAM_ID" ] || [ -z "$APPLE_APP_SPECIFIC_PASSWORD" ]; then
         echo "==> $label 공증 건너뜀: APPLE_ID / APPLE_TEAM_ID / APPLE_APP_SPECIFIC_PASSWORD 를 얻지 못했습니다."
-        return 0
+        return 1
     fi
     echo "==> $label 공증 제출 (수 분 걸립니다)"
     xcrun notarytool submit "$artifact" \
@@ -70,114 +78,44 @@ notarize() {
         --wait
 }
 
+# Stapling routinely fails for a while after Accepted, and on this machine it
+# fails outright -- see README. Never fatal: without a staple Gatekeeper just
+# checks notarization online instead.
+staple_with_retry() {
+    local artifact="$1"
+    for attempt in 1 2 3 4 5; do
+        if xcrun stapler staple "$artifact" >/dev/null 2>&1; then
+            echo "==> 스테이플 완료: $(basename "$artifact")"
+            return 0
+        fi
+        [ "$attempt" -lt 5 ] && sleep 60
+    done
+    echo "==> 스테이플 실패: $(basename "$artifact") — 공증 자체는 유효합니다."
+    echo "    나중에 다시: xcrun stapler staple $artifact"
+    return 1
+}
+
+# ditto rather than zip: everything in a bundle but the Mach-O carries its seal
+# in extended attributes, and zip drops them.
 mkdir -p "$DIST"
-ditto -c -k --keepParent "$BINARY" "$DIST/trolley-universal.zip"
-notarize "$DIST/trolley-universal.zip" "바이너리"
+ZIP="$DIST/trolley-app.zip"
+ditto -c -k --keepParent "$APP" "$ZIP"
+notarize "$ZIP" "앱" || true
 
-# --- 4. Stage the payload ------------------------------------------------------
-echo "==> 스테이징"
-rm -rf "$STAGE"
-mkdir -p "$STAGE$PREFIX/bin" "$STAGE/etc/paths.d"
-install -m 755 "$BINARY" "$STAGE$PREFIX/bin/trolley"
-# Puts trolley on PATH for new login shells without a symlink -- a symlink would
-# make TCC key on the resolved path while the CLI reports the link.
-echo "$PREFIX/bin" > "$STAGE/etc/paths.d/trolley"
-
-# --- 5. Build the package ------------------------------------------------------
-echo "==> pkgbuild"
-pkgbuild \
-    --root "$STAGE" \
-    --identifier "$IDENTIFIER" \
-    --version "$VERSION" \
-    --install-location / \
-    --scripts Scripts/pkg/scripts \
-    "$DIST/trolley-component.pkg" >/dev/null
-
-echo "==> productbuild"
-PKG="$DIST/trolley-$VERSION.pkg"
-productbuild \
-    --distribution Scripts/pkg/distribution.xml \
-    --resources Scripts/pkg/resources \
-    --package-path "$DIST" \
-    "$PKG" >/dev/null
-
-cp "$BINARY" "$DIST/trolley-universal"
-rm -f "$DIST/trolley-component.pkg"
-rm -rf "$STAGE"
-
-# --- 6. Installer app in a signed, notarized disk image -------------------------
-# The distributable artifact, because a .pkg cannot be signed without a Developer
-# ID *Installer* certificate and macOS refuses to open unsigned ones -- measured:
-# both a bare unsigned pkg and one nested inside a signed dmg come back Invalid
-# from notarytool, and productsign rejects the Application identity outright.
-# An app bundle signs with the certificate we do have.
-echo "==> 설치 앱 빌드"
-DMGROOT="$DIST/dmgroot"
-APP="$DMGROOT/trolley 설치.app"
-rm -rf "$DMGROOT"
-mkdir -p "$DMGROOT"
-osacompile -o "$APP" Scripts/dmg/installer.applescript
-install -m 755 "$BINARY" "$APP/Contents/Resources/trolley"
-# Inside out: the outer signature covers the inner one.
-codesign --force --options runtime --timestamp \
-    --keychain "$TROLLEY_KEYCHAIN" --sign "$TROLLEY_SIGN_ID" "$APP/Contents/Resources/trolley"
-codesign --force --options runtime --timestamp \
-    --keychain "$TROLLEY_KEYCHAIN" --sign "$TROLLEY_SIGN_ID" "$APP"
-codesign --verify --strict --deep --verbose=2 "$APP"
-
+# --- 4. Disk image ------------------------------------------------------------
 echo "==> dmg 생성"
+# The /Applications alias is what makes the window a drag target.
+ln -s /Applications "$DMGROOT/Applications"
 DMG="$DIST/trolley-$VERSION.dmg"
 rm -f "$DMG"
 hdiutil create -volname "trolley $VERSION" -srcfolder "$DMGROOT" -ov -format UDZO "$DMG" >/dev/null
 codesign --force --timestamp --keychain "$TROLLEY_KEYCHAIN" --sign "$TROLLEY_SIGN_ID" "$DMG"
 
-if notarize "$DMG" "설치 dmg"; then
-    # Stapling is what makes this work offline and on a first launch with no
-    # network -- the ticket travels inside the dmg instead of being looked up.
-    #
-    # It routinely fails for a while right after Accepted: the ticket is issued
-    # (it is listed in `notarytool log`) but Apple's distribution endpoint has not
-    # started serving it, and stapler reports "Could not validate ticket". Retry
-    # rather than fail the build.
-    stapled=false
-    for attempt in 1 2 3 4 5 6 7 8 9 10; do
-        if xcrun stapler staple "$DMG" >/dev/null 2>&1; then
-            stapled=true
-            break
-        fi
-        echo "    스테이플 대기 중… ($attempt/10)"
-        sleep 60
-    done
-    if $stapled; then
-        xcrun stapler validate "$DMG"
-    else
-        echo "==> 스테이플 실패: 공증은 통과했으나 티켓이 아직 배포되지 않았습니다."
-        echo "    인터넷이 있는 맥에서는 온라인 확인으로 통과합니다."
-        echo "    나중에 다시: xcrun stapler staple $DMG"
-    fi
+if notarize "$DMG" "dmg"; then
+    staple_with_retry "$DMG" || true
 fi
 rm -rf "$DMGROOT"
 
-# --- 7. Sign and notarize the package ------------------------------------------
-# A pkg needs a Developer ID *Installer* certificate -- a different certificate
-# from the Application one used above, and one this team does not have yet.
-# notarytool rejects unsigned packages, so both steps wait on it together.
-INSTALLER_ID=$(security find-identity -v "$TROLLEY_KEYCHAIN" 2>/dev/null \
-    | awk -F'"' '/Developer ID Installer/ { print $2 }' | sed -n '1p')
-if [ -n "$INSTALLER_ID" ]; then
-    echo "==> productsign: $INSTALLER_ID"
-    productsign --keychain "$TROLLEY_KEYCHAIN" --sign "$INSTALLER_ID" "$PKG" "$PKG.signed"
-    mv "$PKG.signed" "$PKG"
-    notarize "$PKG" "설치파일"
-    xcrun stapler staple "$PKG"
-else
-    echo "==> pkg 서명·공증 건너뜀: Developer ID Installer 인증서가 없습니다."
-    echo "    developer.apple.com 에서 한 번 발급해 SSM 에 넣으면 이 블록이 그대로 동작합니다."
-    echo "    그전까지는 다른 맥에서 첫 실행 시 우클릭 → 열기가 필요합니다."
-fi
-
 echo
-echo "완성: $DMG                (배포용 — 서명·공증·스테이플)"
-echo "      $PKG          (Installer 인증서가 생기면 이쪽이 주력)"
-echo "      $DIST/trolley-universal      (trolley update 용 자산)"
-echo "      $DIST/trolley-universal.zip  (공증 제출본)"
+echo "완성: $DMG   (배포용 — 끌어다 놓기)"
+echo "      $ZIP        (trolley update 용 자산)"
