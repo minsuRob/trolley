@@ -15,6 +15,17 @@
 # TCC lists the app by name instead of showing a bare executable path.
 set -euo pipefail
 
+# Notarization is two round trips to Apple, several minutes each. Skipping it is
+# for local builds only: the result installs and runs on this machine, but
+# Gatekeeper will refuse it anywhere else.
+SKIP_NOTARIZE=${TROLLEY_SKIP_NOTARIZE:-0}
+for arg in "$@"; do
+    case "$arg" in
+        --skip-notarize|--no-notarize) SKIP_NOTARIZE=1 ;;
+        *) echo "error: 모르는 옵션 $arg" >&2; exit 1 ;;
+    esac
+done
+
 cd "$(dirname "$0")/.."
 source Scripts/signing-keychain.sh
 
@@ -68,12 +79,20 @@ TEAM=$(codesign -dv --verbose=4 "$APP" 2>&1 | sed -n 's/^TeamIdentifier=//p')
 echo "==> TeamIdentifier=$TEAM"
 
 # --- 3. Notarize --------------------------------------------------------------
-APPLE_ID="${APPLE_ID:-$(trolley_ssm APPLE_ID)}"
-APPLE_TEAM_ID="${APPLE_TEAM_ID:-$(trolley_ssm APPLE_TEAM_ID)}"
-APPLE_APP_SPECIFIC_PASSWORD="${APPLE_APP_SPECIFIC_PASSWORD:-$(trolley_ssm APPLE_APP_SPECIFIC_PASSWORD)}"
+if [ "$SKIP_NOTARIZE" = "1" ]; then
+    APPLE_ID=""; APPLE_TEAM_ID=""; APPLE_APP_SPECIFIC_PASSWORD=""
+else
+    APPLE_ID="${APPLE_ID:-$(trolley_ssm APPLE_ID)}"
+    APPLE_TEAM_ID="${APPLE_TEAM_ID:-$(trolley_ssm APPLE_TEAM_ID)}"
+    APPLE_APP_SPECIFIC_PASSWORD="${APPLE_APP_SPECIFIC_PASSWORD:-$(trolley_ssm APPLE_APP_SPECIFIC_PASSWORD)}"
+fi
 
 notarize() {
     local artifact="$1" label="$2"
+    if [ "$SKIP_NOTARIZE" = "1" ]; then
+        echo "==> $label 공증 생략 (--skip-notarize)"
+        return 1
+    fi
     if [ -z "$APPLE_ID" ] || [ -z "$APPLE_TEAM_ID" ] || [ -z "$APPLE_APP_SPECIFIC_PASSWORD" ]; then
         echo "==> $label 공증 건너뜀: APPLE_ID / APPLE_TEAM_ID / APPLE_APP_SPECIFIC_PASSWORD 를 얻지 못했습니다."
         return 1
@@ -166,5 +185,9 @@ fi
 rm -rf "$DMGROOT"
 
 echo
-echo "완성: $DMG   (배포용 — 끌어다 놓기)"
+if [ "$SKIP_NOTARIZE" = "1" ]; then
+    echo "완성: $DMG   (로컬 확인용 — 공증 없음, 배포 불가)"
+else
+    echo "완성: $DMG   (배포용 — 끌어다 놓기)"
+fi
 echo "      $ZIP        (trolley update 용 자산)"

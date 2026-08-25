@@ -109,11 +109,16 @@ trolley update --check   # 확인만
 ### 설치파일 만들기 (개발자용)
 
 ```sh
-./Scripts/build-installer.sh
+./Scripts/build-installer.sh                  # 배포용 — 공증까지
+./Scripts/build-installer.sh --skip-notarize  # 로컬 확인용 — 10초면 끝난다
 ```
 
 유니버설(arm64 + x86_64) 릴리스를 빌드해 앱 번들로 조립하고, Developer ID Application으로
 서명·공증한 뒤 `dist/`에 둘을 만든다.
+
+공증은 Apple 을 두 번 왕복해 8~10분이 걸린다. 손보고 바로 확인하는 동안에는
+`--skip-notarize`(또는 `TROLLEY_SKIP_NOTARIZE=1`)로 건너뛴다 — 서명은 그대로라 이 맥에서는
+설치도 실행도 되지만, **다른 맥에서는 Gatekeeper 가 막으므로 배포하면 안 된다.**
 
 | 산출물 | 용도 |
 | --- | --- |
