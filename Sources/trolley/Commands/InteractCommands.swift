@@ -60,19 +60,26 @@ struct ClickCommand: ParsableCommand {
 struct TypeCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "type-text",
-        abstract: "Activate an app and type text into whatever currently has keyboard focus (CGEvent-based)."
+        abstract: "Activate an app and insert text into whatever currently has keyboard focus."
     )
 
     @Option(help: "Bundle identifier of the target app.")
     var bundleId: String
 
-    @Option(help: "Text to type.")
+    @Option(help: "Text to insert.")
     var text: String
+
+    @Option(help: "paste (any Unicode), keys (ASCII, real keystrokes), or unicode (legacy, usually not delivered).")
+    var method: String = TextEntryMethod.paste.rawValue
 
     func run() throws {
         let checker = SystemTrustChecker()
         guard AccessibilityPermission.ensureTrusted(checker: checker, prompt: true) else {
             print("not trusted"); throw ExitCode.failure
+        }
+        guard let entryMethod = TextEntryMethod(rawValue: method) else {
+            print("unknown method \"\(method)\"; valid: \(TextEntryMethod.allCases.map(\.rawValue).joined(separator: ", "))")
+            throw ExitCode.failure
         }
 
         let launcher = AppLauncher()
@@ -80,8 +87,28 @@ struct TypeCommand: ParsableCommand {
         _ = try launcher.launchOrActivate(bundleID: bundleId, locator: locator)
         Thread.sleep(forTimeInterval: 0.4)
 
-        KeyboardActions.type(text, using: CGKeyboardSynthesizer())
-        print("typed \"\(text)\" into \(bundleId)")
+        let engine = TextEntryEngine(
+            makePoster: { CGKeyboardSynthesizer(targetPid: $0) },
+            clipboard: NSPasteboardClipboard(),
+            inputSource: TISInputSourceController()
+        )
+
+        do {
+            // No element is targeted here, so the result is structurally
+            // unverifiable -- say so rather than claiming it was typed.
+            let outcome = try engine.insert(text, method: entryMethod, element: nil, targetPid: nil)
+            var notes = ["method=\(outcome.method.rawValue)", "not verified (no element targeted)"]
+            if let restored = outcome.clipboardRestored {
+                notes.append(restored ? "clipboard restored" : "clipboard NOT restored")
+            }
+            if let restored = outcome.inputSourceRestored {
+                notes.append(restored ? "input source restored" : "input source NOT restored")
+            }
+            print("sent \"\(text)\" to \(bundleId) (\(notes.joined(separator: "; ")))")
+        } catch let error as TextEntryError {
+            print("failed: \(error)")
+            throw ExitCode.failure
+        }
     }
 }
 
@@ -95,10 +122,6 @@ enum RunHelpers {
     }
 
     static func postMouseClick(at point: CGPoint) {
-        let source: CGEventSource? = nil
-        let down = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)
-        let up = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)
-        down?.post(tap: .cghidEventTap)
-        up?.post(tap: .cghidEventTap)
+        MouseSynthesizer.click(at: point)
     }
 }
