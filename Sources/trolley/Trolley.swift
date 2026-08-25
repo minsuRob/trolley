@@ -8,7 +8,9 @@ struct Trolley: ParsableCommand {
         subcommands: [
             CheckPermissionsCommand.self,
             DumpTreeCommand.self,
-            RunCommand.self
+            RunCommand.self,
+            ClickCommand.self,
+            TypeCommand.self
         ]
     )
 }
