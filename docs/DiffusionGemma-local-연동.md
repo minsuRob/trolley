@@ -9,7 +9,7 @@ Apple Silicon에서 Google DiffusionGemma를 로컬로 돌리는 자체 호스�
 
 | | |
 | --- | --- |
-| 위치 | `/Users/markhub/Desktop/workspace/llm/DiffusionGemma-local` |
+| 위치 | `/Users/markhub/Desktop/workspace/llm-trolley/DiffusionGemma-local` |
 | 원격 | `github.com/minsuRob/DiffusionGemma-local` |
 | 모델 | `mlx-community/diffusiongemma-26B-A4B-it-4bit` (26B MoE / 3.8B 활성, 4bit, ~16.5GB) |
 | 런타임 | mlx-vlm. **모델이 서버 프로세스 안에 인프로세스로 로드된다** |
