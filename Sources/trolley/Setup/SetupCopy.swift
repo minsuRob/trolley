@@ -91,7 +91,7 @@ enum SetupCopy {
 
     // MARK: - Optional
 
-    static let llmTitle = "답을 만드는 서버"
+    static let llmTitle = "Local LLM 연결 주소"
 
     /// The model id, the address and the queue depth all move to `details(...)`.
     /// What belongs here is only whether asking will work right now.
@@ -110,7 +110,7 @@ enum SetupCopy {
         }
     }
 
-    static let llmSheetTitle = "답을 만드는 서버 주소"
+    static let llmSheetTitle = "Local LLM 연결 주소"
     static let llmSheetBody = "평소에는 바꿀 일이 없습니다. 비워두면 기본값으로 돌아갑니다."
 
     static let mcpTitle = "Claude Code에 연결 (선택)"

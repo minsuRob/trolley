@@ -37,6 +37,10 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
     private let previewText = NSTextView()
     private let previewScroll = NSScrollView()
 
+    /// Held so `show()` can size the window to whatever the controls actually need.
+    private let container = NSView()
+    private let rootStack = NSStackView()
+
     /// The closed enums, from the vault's own `CLAUDE.md`. 영역 and 담당 are open sets
     /// and are free text instead -- hard-coding them would drop a new teammate out of
     /// the filter on the day they join.
@@ -55,10 +59,17 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
     /// twelve edits and twelve previews.
     private var isPopulating = false
 
+    /// Wide enough for the filter grid's two label+control pairs without squeezing
+    /// 제목·요약에 포함된 말 down to a stub.
+    private static let contentWidth: CGFloat = 560
+    private static let minContentHeight: CGFloat = 520
+
     override init() {
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 640),
-            styleMask: [.titled, .closable],
+            contentRect: NSRect(x: 0, y: 0, width: Self.contentWidth, height: Self.minContentHeight),
+            // Resizable because the preview is the point: giving it more room is the
+            // one adjustment someone reading a 7,000-character digest actually wants.
+            styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
@@ -72,17 +83,38 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
         // default, which under ARC leaves this controller holding freed memory.
         window.isReleasedWhenClosed = false
         window.delegate = self
-        window.center()
         window.contentView = makeContentView()
+        window.contentMinSize = NSSize(width: Self.contentWidth, height: Self.minContentHeight)
+        sizeToFit()
+        window.center()
     }
 
     var isVisible: Bool { window.isVisible }
+
+    /// The laid-out view tree, so `WikiSettingsLayoutTests` can assert that no two
+    /// controls sit on top of each other. Nothing in the app reads this.
+    var contentViewForTesting: NSView { container }
 
     func show() {
         populate()
         refreshPreview()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// The window opens at whatever the controls need rather than at a number typed
+    /// into `contentRect`. A guessed height is how a control ends up off the bottom
+    /// edge -- unreachable, but with nothing on screen saying so.
+    private func sizeToFit() {
+        container.layoutSubtreeIfNeeded()
+        let height = max(rootStack.fittingSize.height, Self.minContentHeight)
+        var frame = window.frameRect(
+            forContentRect: NSRect(x: 0, y: 0, width: Self.contentWidth, height: height)
+        )
+        // NSWindow origins are bottom-left, so resizing without this drops the title
+        // bar down the screen.
+        frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
+        window.setFrame(frame, display: false, animate: false)
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -113,9 +145,12 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
         summaryCheckbox.target = self
         summaryCheckbox.action = #selector(controlChanged)
 
-        let optionsBox = NSBox()
-        optionsBox.title = "상세 옵션"
-        optionsBox.contentView = makeOptionsView()
+        // Deliberately not an NSBox. `NSBox.contentView = someAutoLayoutView` does not
+        // constrain what it is handed, so the options stack was left unpositioned and
+        // drew upward out of the box across the heading and the path row -- every
+        // filter control landed on top of something else and half of them could not be
+        // clicked at all. A plain heading is also what 위키 폴더 and 미리보기 already use.
+        let optionsView = makeOptionsView()
 
         summaryLabel.font = .systemFont(ofSize: 11, weight: .medium)
         summaryLabel.textColor = .secondaryLabelColor
@@ -128,7 +163,11 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
         previewScroll.hasVerticalScroller = true
         previewScroll.borderType = .bezelBorder
         previewScroll.translatesAutoresizingMaskIntoConstraints = false
-        previewScroll.heightAnchor.constraint(equalToConstant: 170).isActive = true
+        previewScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 170).isActive = true
+        // The one view that should absorb whatever height the window is dragged to.
+        // Everything above it is a fixed-size control; stretching those would only
+        // scatter them.
+        previewScroll.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
 
         let saveButton = NSButton(title: "저장", target: self, action: #selector(save))
         saveButton.bezelStyle = .rounded
@@ -141,27 +180,29 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
         buttonRow.orientation = .horizontal
         buttonRow.spacing = 8
 
-        let stack = NSStackView(views: [
+        rootStack.orientation = .vertical
+        rootStack.alignment = .leading
+        rootStack.spacing = 10
+        rootStack.edgeInsets = NSEdgeInsets(top: 16, left: 18, bottom: 14, right: 18)
+        rootStack.translatesAutoresizingMaskIntoConstraints = false
+        for view in [
             heading("위키 폴더"), pathRow, enabledCheckbox,
-            optionsBox, heading("미리보기"), summaryLabel, previewScroll, buttonRow
-        ])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 10
-        stack.edgeInsets = NSEdgeInsets(top: 16, left: 18, bottom: 14, right: 18)
-        stack.translatesAutoresizingMaskIntoConstraints = false
+            heading("상세 옵션"), optionsView,
+            heading("미리보기"), summaryLabel, previewScroll, buttonRow
+        ] {
+            rootStack.addArrangedSubview(view)
+        }
 
-        let container = NSView()
-        container.addSubview(stack)
+        container.addSubview(rootStack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: container.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            pathRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36),
-            optionsBox.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36),
-            previewScroll.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36),
-            buttonRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36)
+            rootStack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            rootStack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            rootStack.topAnchor.constraint(equalTo: container.topAnchor),
+            rootStack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            pathRow.widthAnchor.constraint(equalTo: rootStack.widthAnchor, constant: -36),
+            optionsView.widthAnchor.constraint(equalTo: rootStack.widthAnchor, constant: -36),
+            previewScroll.widthAnchor.constraint(equalTo: rootStack.widthAnchor, constant: -36),
+            buttonRow.widthAnchor.constraint(equalTo: rootStack.widthAnchor, constant: -36)
         ])
         return container
     }
@@ -224,12 +265,17 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
         grid.columnSpacing = 8
         grid.column(at: 1).width = 150
         grid.column(at: 3).width = 150
+        // Without this the stack stretches the grid to the window's width and the
+        // slack all lands in the 상태/우선순위/담당/정렬 label column, leaving each of
+        // those labels stranded a hundred points from the control it names.
+        grid.setContentHuggingPriority(.required, for: .horizontal)
 
         let stack = NSStackView(views: [grid, label("폴더"), folderRow, limitRow])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
+        // Indented under its heading rather than boxed -- see `makeContentView`.
+        stack.edgeInsets = NSEdgeInsets(top: 2, left: 10, bottom: 4, right: 0)
         return stack
     }
 
