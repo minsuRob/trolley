@@ -46,6 +46,17 @@ public enum WikiDigestRenderer {
     /// (`peak_GB ≈ 18.0 + 0.085 * tokens/1000`). Paid once per conversation.
     public static let defaultBudget = 9_000
 
+    /// Characters to tokens, at the 2.2 ratio measured on this vault's Korean.
+    ///
+    /// One copy on purpose. Three screens quote this number back at the same
+    /// person -- the setup window, the wiki settings window and `trolley wiki` --
+    /// and two of them disagreeing about one folder would read as a bug in the
+    /// folder. There is no tokenizer on this side, the server holds it, so an
+    /// estimate is the most any caller can have.
+    public static func approximateTokens(characters: Int) -> Int {
+        Int(Double(characters) / 2.2)
+    }
+
     public static func render(
         pages: [WikiPage],
         filter: WikiFilter,

@@ -110,6 +110,101 @@ final class SetupCopyTests: XCTestCase {
         let text = SetupCopy.diagnostics([("버전", "0.1.0"), ("모델", "x")])
         XCTAssertEqual(text, "버전: 0.1.0\n모델: x")
     }
+
+    // MARK: - 리소스
+
+    /// Everything the server actually sends, which is the case the button exists for.
+    private func fullResources(
+        busy: Bool = false,
+        waiting: Int = 0,
+        maxQueueDepth: Int? = 8,
+        maxContext: Int? = 96_000,
+        hardContextLimit: Int? = 120_000,
+        wikiTokens: Int? = 4_100,
+        lastPeakGB: Double? = 24.6,
+        totalJobs: Int? = 38,
+        remoteActive: Int? = 0,
+        remoteLimit: Int? = 4
+    ) -> [(label: String, value: String)] {
+        SetupCopy.resources(
+            busy: busy, waiting: waiting, maxQueueDepth: maxQueueDepth,
+            maxContext: maxContext, hardContextLimit: hardContextLimit,
+            wikiTokens: wikiTokens, lastPeakGB: lastPeakGB, totalJobs: totalJobs,
+            remoteActive: remoteActive, remoteLimit: remoteLimit
+        )
+    }
+
+    private func value(_ rows: [(label: String, value: String)], _ label: String) -> String? {
+        rows.first(where: { $0.label == label })?.value
+    }
+
+    func testResourcesCoversEveryHeadroomTheServerReports() {
+        XCTAssertEqual(
+            fullResources().map(\.label),
+            ["지금", "대기 줄", "한 번에 담는 글", "안전 상한", "메모리", "처리한 질문", "원격 모델"]
+        )
+    }
+
+    func testQueueRowSaysHowManyPlacesAreLeft() {
+        XCTAssertEqual(value(fullResources(waiting: 3), "대기 줄"), "8자리 중 3자리 사용 — 5자리 남음")
+        // A full queue is the moment the server starts answering 503, so it must
+        // read as zero left rather than going negative.
+        XCTAssertEqual(value(fullResources(waiting: 9), "대기 줄"), "8자리 중 9자리 사용 — 0자리 남음")
+    }
+
+    func testContextRowSubtractsTheWikiAndGroupsDigits() {
+        let line = value(fullResources(), "한 번에 담는 글")
+        XCTAssertEqual(line, "96,000토큰까지 · 위키가 약 4,100토큰 · 약 91,900토큰 남음")
+        XCTAssertEqual(value(fullResources(), "안전 상한"), "120,000토큰")
+    }
+
+    func testContextRowWithoutAWikiSaysTheRoomIsAllThere() {
+        let line = value(fullResources(wikiTokens: nil), "한 번에 담는 글")
+        XCTAssertEqual(line, "96,000토큰까지 · 위키는 함께 가지 않아 전부 남습니다")
+    }
+
+    /// The rule the whole table is held to: a number nobody sent is never invented.
+    func testAnUnknownCeilingIsSaidRatherThanGuessed() {
+        let rows = fullResources(maxContext: nil, hardContextLimit: nil)
+        XCTAssertEqual(value(rows, "한 번에 담는 글"), "확인 중…")
+        XCTAssertNil(value(rows, "안전 상한"))
+        for row in rows {
+            XCTAssertFalse(row.value.contains("0토큰 남음"), "없는 값을 계산했습니다: \(row.value)")
+        }
+    }
+
+    /// A server that has not answered anything yet reports no peak. Rendering that
+    /// as 0.0GB would claim the model is using nothing.
+    func testAFreshServerSaysItsMemoryIsUnknownRatherThanZero() {
+        let memory = value(fullResources(lastPeakGB: nil), "메모리")
+        XCTAssertEqual(memory, "아직 답한 적이 없어 알 수 없습니다")
+        XCTAssertFalse(memory?.contains("0.0GB") ?? true)
+        XCTAssertEqual(value(fullResources(), "메모리"), "마지막 답변이 최고 24.6GB 썼습니다")
+    }
+
+    /// An older server sends none of these. The rows it cannot fill are dropped,
+    /// not filled with zeros -- but the two it always sends stay.
+    func testAnOlderServerStillGetsTheRowsItCanAnswer() {
+        let rows = SetupCopy.resources(
+            busy: true, waiting: 2, maxQueueDepth: nil, maxContext: nil,
+            hardContextLimit: nil, wikiTokens: nil, lastPeakGB: nil,
+            totalJobs: nil, remoteActive: nil, remoteLimit: nil
+        )
+        XCTAssertEqual(rows.map(\.label), ["지금", "대기 줄", "한 번에 담는 글", "메모리"])
+        XCTAssertEqual(value(rows, "지금"), "답하는 중입니다")
+        XCTAssertEqual(value(rows, "대기 줄"), "2명 기다리는 중")
+    }
+
+    func testUnreachableSaysWhyInsteadOfShowingZeros() {
+        let text = SetupCopy.resourcesUnavailable("서버에 닿지 못했습니다 — 시간 초과")
+        XCTAssertTrue(text.contains("읽지 못했습니다"))
+        XCTAssertTrue(text.contains("시간 초과"))
+        XCTAssertFalse(text.contains("0"))
+    }
+
+    func testTheButtonIsNamedForWhatItShows() {
+        XCTAssertEqual(SetupCopy.detailsResourceButton, "리소스 확인")
+    }
 }
 
 final class FirstReadyLatchTests: XCTestCase {

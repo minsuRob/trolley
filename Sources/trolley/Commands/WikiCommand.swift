@@ -187,7 +187,7 @@ struct WikiCommand: ParsableCommand {
         print("다이제스트: \(digest.matched)/\(digest.total)건 · \(digest.characters)자 · 예산의 \(Int(percent.rounded()))%")
         // The number that matters: what this costs the model. 96,000 is
         // context_guard.py's measured soft limit on the other side.
-        let tokens = Int(Double(digest.characters) / 2.2)
+        let tokens = WikiDigestRenderer.approximateTokens(characters: digest.characters)
         print("            ≈ \(tokens) 토큰 · 96K 컨텍스트의 \(String(format: "%.1f", Double(tokens) / 960))%")
         if digest.wasTruncated {
             print("경고     : 예산 상한으로 \(digest.total - digest.matched)건이 빠졌습니다.")

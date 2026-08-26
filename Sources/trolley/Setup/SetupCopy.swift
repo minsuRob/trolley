@@ -137,4 +137,102 @@ enum SetupCopy {
     static func diagnostics(_ rows: [(label: String, value: String)]) -> String {
         rows.map { "\($0.label): \($0.value)" }.joined(separator: "\n")
     }
+
+    // MARK: - 리소스
+
+    static let detailsResourceButton = "리소스 확인"
+    static let resourceSheetTitle = "지금 이 모델의 여유"
+
+    /// The same (label, value) shape as `details(...)`, so `diagnostics(_:)` renders
+    /// it and the sheet stays one string.
+    ///
+    /// Scalars rather than a `LocalLLMClient.Status`, for the reason this whole file
+    /// exists: half the value of this table is what it says when a number is
+    /// *missing*, and that branch is only testable if a test can leave one out.
+    ///
+    /// Jargon rule: this sits inside "자세히" next to 정보 복사, on the `details(...)`
+    /// side of the line -- 토큰 and GB are the right words here, and there is no
+    /// plainer one that still means the thing.
+    static func resources(
+        busy: Bool,
+        waiting: Int,
+        maxQueueDepth: Int?,
+        maxContext: Int?,
+        hardContextLimit: Int?,
+        wikiTokens: Int?,
+        lastPeakGB: Double?,
+        totalJobs: Int?,
+        remoteActive: Int?,
+        remoteLimit: Int?
+    ) -> [(label: String, value: String)] {
+        var rows: [(label: String, value: String)] = [
+            ("지금", busy ? "답하는 중입니다" : "쉬고 있습니다")
+        ]
+
+        if let maxQueueDepth {
+            let free = max(0, maxQueueDepth - waiting)
+            rows.append((
+                "대기 줄",
+                "\(maxQueueDepth)자리 중 \(waiting)자리 사용 — \(free)자리 남음"
+            ))
+        } else {
+            rows.append(("대기 줄", "\(waiting)명 기다리는 중"))
+        }
+
+        // No arithmetic without the ceiling: a headroom figure derived from a
+        // guessed limit is not a headroom figure.
+        if let maxContext {
+            var line = "\(number(maxContext))토큰까지"
+            if let wikiTokens {
+                line += " · 위키가 약 \(number(wikiTokens))토큰"
+                line += " · 약 \(number(max(0, maxContext - wikiTokens)))토큰 남음"
+            } else {
+                line += " · 위키는 함께 가지 않아 전부 남습니다"
+            }
+            rows.append(("한 번에 담는 글", line))
+        } else {
+            rows.append(("한 번에 담는 글", "확인 중…"))
+        }
+
+        if let hardContextLimit {
+            rows.append(("안전 상한", "\(number(hardContextLimit))토큰"))
+        }
+
+        if let lastPeakGB {
+            rows.append(("메모리", "마지막 답변이 최고 \(String(format: "%.1f", lastPeakGB))GB 썼습니다"))
+        } else {
+            rows.append(("메모리", "아직 답한 적이 없어 알 수 없습니다"))
+        }
+
+        if let totalJobs {
+            rows.append(("처리한 질문", "\(number(totalJobs))건"))
+        }
+
+        if let remoteLimit {
+            rows.append(("원격 모델", "\(remoteLimit)자리 중 \(remoteActive ?? 0)자리 사용"))
+        }
+
+        return rows
+    }
+
+    /// Says why there are no numbers instead of showing zeros. The address is the
+    /// thing to check, and the row above the button already offers the button that
+    /// changes it.
+    static func resourcesUnavailable(_ reason: String) -> String {
+        "서버에서 지금 상태를 읽지 못했습니다.\n\(reason)"
+    }
+
+    /// Thousands separators by hand rather than a `NumberFormatter`: this table
+    /// puts 96000 two lines above 120000, which is the exact pair that is easy to
+    /// misread, and a formatter would drag a locale into a string that is Korean
+    /// either way.
+    private static func number(_ value: Int) -> String {
+        let digits = Array(String(abs(value)))
+        var out = ""
+        for (index, digit) in digits.enumerated() {
+            if index > 0, (digits.count - index) % 3 == 0 { out.append(",") }
+            out.append(digit)
+        }
+        return (value < 0 ? "-" : "") + out
+    }
 }

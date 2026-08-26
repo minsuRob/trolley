@@ -213,10 +213,23 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         copy.bezelStyle = .rounded
         copy.controlSize = .small
 
+        let resources = NSButton(
+            title: SetupCopy.detailsResourceButton, target: self, action: #selector(showResources)
+        )
+        resources.bezelStyle = .rounded
+        resources.controlSize = .small
+
+        // Side by side: both act on the same table above them, and stacking them
+        // would grow a window that already resizes itself on a 1.5-second timer.
+        let buttons = NSStackView(views: [copy, resources])
+        buttons.orientation = .horizontal
+        buttons.alignment = .centerY
+        buttons.spacing = 8
+
         detailsGroup.orientation = .vertical
         detailsGroup.alignment = .leading
         detailsGroup.spacing = 10
-        for view in [detailsGrid, copy] {
+        for view in [detailsGrid, buttons] {
             detailsGroup.addArrangedSubview(view)
         }
     }
@@ -386,6 +399,54 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         )
     }
 
+    /// A snapshot of what the server said, not a fresh question to it.
+    ///
+    /// `llmStatus` is refilled by the same 5-second-throttled probe that draws the
+    /// row's dot, so what this shows is at most five seconds old. Firing a new
+    /// request here instead would leave the button doing nothing visible until the
+    /// reply landed -- no other button in this window behaves that way, and the
+    /// numbers are not moving fast enough to be worth the wait.
+    @objc private func showResources() {
+        let message: String
+        switch llmStatus {
+        case .success(let status):
+            message = SetupCopy.diagnostics(resourceRows(status))
+        case .failure(let failure):
+            message = SetupCopy.resourcesUnavailable(failure.localizedDescription)
+        case .none:
+            message = SetupCopy.resourcesUnavailable("아직 확인 중입니다. 잠시 뒤 다시 눌러 주세요.")
+        }
+        present(title: SetupCopy.resourceSheetTitle, message: message, critical: false)
+    }
+
+    /// The wiki share is counted here rather than on the server because the server
+    /// never sees it as a separate thing -- the digest rides inside the question's
+    /// one `content` string. A wiki that is off contributes nothing, which is not
+    /// the same as a wiki whose folder could not be read; both come back nil and
+    /// the copy says the room is all still there.
+    private func resourceRows(
+        _ status: LocalLLMClient.Status
+    ) -> [(label: String, value: String)] {
+        let wikiTokens: Int?
+        if WikiSettings.isEnabled, let digest = WikiContext.shared.currentDigest() {
+            wikiTokens = WikiDigestRenderer.approximateTokens(characters: digest.characters)
+        } else {
+            wikiTokens = nil
+        }
+        return SetupCopy.resources(
+            busy: status.busy,
+            waiting: status.waiting,
+            maxQueueDepth: status.maxQueueDepth,
+            maxContext: status.maxContext,
+            hardContextLimit: status.hardContextLimit,
+            wikiTokens: wikiTokens,
+            lastPeakGB: status.lastPeakGB,
+            totalJobs: status.totalJobs,
+            remoteActive: status.remoteActive,
+            remoteLimit: status.remoteLimit
+        )
+    }
+
     // MARK: - LLM 위키
 
     /// The team's markdown vault, read from a local folder and summarised in front of
@@ -430,7 +491,7 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         }
 
         wikiState = .done
-        let tokens = Int(Double(digest.characters) / 2.2)
+        let tokens = WikiDigestRenderer.approximateTokens(characters: digest.characters)
         var detail = "\(digest.matched)/\(digest.total)건 · 약 \(tokens)토큰"
         detail += " (96K의 \(String(format: "%.1f", Double(tokens) / 960))%)"
         if digest.wasTruncated { detail += " · \(digest.total - digest.matched)건 생략" }
