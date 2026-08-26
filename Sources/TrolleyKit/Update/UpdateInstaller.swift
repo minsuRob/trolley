@@ -37,6 +37,23 @@ public struct UpdateInstaller {
         return UpdateDecision.decide(current: current, latest: latest)
     }
 
+    /// A verified copy waiting beside the installation, not yet swapped in.
+    ///
+    /// Exists because "download automatically, install when asked" needs the two
+    /// halves to be separable in time: `stage` can run on a timer without ever
+    /// disturbing the user, and `commit` is what a button press does.
+    public struct StagedUpdate: Equatable {
+        public let version: SemanticVersion
+        public let staging: URL
+        public let target: URL
+
+        public init(version: SemanticVersion, staging: URL, target: URL) {
+            self.version = version
+            self.staging = staging
+            self.target = target
+        }
+    }
+
     /// Downloads beside what it is replacing, verifies, then swaps.
     ///
     /// The staging path is always a sibling of the target because the swap is a
@@ -51,6 +68,26 @@ public struct UpdateInstaller {
         current: SemanticVersion,
         layout: InstallLayout
     ) throws -> SemanticVersion? {
+        guard let staged = try stage(
+            feed: feed, assetName: assetName, current: current, layout: layout
+        ) else { return nil }
+        try commit(staged)
+        return staged.version
+    }
+
+    /// Everything `install` does except the swap: fetch, unpack, verify.
+    ///
+    /// Stops with the new copy sitting next to the old one. Nothing the user can
+    /// see has changed at this point, which is the property that makes running
+    /// this on a timer acceptable.
+    ///
+    /// - Returns: what is now staged, or nil when already current.
+    public func stage(
+        feed: URL,
+        assetName: String,
+        current: SemanticVersion,
+        layout: InstallLayout
+    ) throws -> StagedUpdate? {
         guard case .available(let release) = try check(feed: feed, assetName: assetName, current: current) else {
             return nil
         }
@@ -79,13 +116,36 @@ public struct UpdateInstaller {
                 removeTemporary(archive)
             }
             try verifySignature(staging)
-            try replace(staging, target)
         } catch {
             removeTemporary(staging)
             removeTemporary(archive)
             throw error
         }
-        return release.version
+        return StagedUpdate(version: release.version, staging: staging, target: target)
+    }
+
+    /// Swaps a staged copy in. The only step that changes what is installed.
+    ///
+    /// A failure here still clears the staging path: leaving a half-swapped
+    /// sibling behind would make the next `stage` refuse, and the installation
+    /// it could not replace is the one still running.
+    public func commit(_ staged: StagedUpdate) throws {
+        do {
+            try replace(staged.staging, staged.target)
+        } catch {
+            removeTemporary(staged.staging)
+            throw error
+        }
+    }
+
+    /// Throws away a staged copy without installing it.
+    ///
+    /// Called when the app quits: a verified download is a whole app bundle, and
+    /// leaving hundreds of megabytes beside the installation to be picked up
+    /// "next time" trades disk for a re-download that the six-hour check would
+    /// have made anyway.
+    public func discard(_ staged: StagedUpdate) {
+        removeTemporary(staged.staging)
     }
 }
 

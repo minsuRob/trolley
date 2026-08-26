@@ -41,6 +41,19 @@ private final class WidgetContentView: FolderIconView {
     }
 }
 
+/// The update affordance drawn over the pet.
+///
+/// Circular and centred rather than tucked into a corner: the pet is 72pt and
+/// already carries a status badge top-right and a spinner low-centre, so the
+/// middle is the only place left that reads as "this is about the whole thing"
+/// rather than "this is about the last tool call".
+private final class UpdateBadgeButton: NSButton {
+    /// The pet belongs to an inactive app. Without this the first click is spent
+    /// activating and the badge looks broken -- the same trap the pet's own view
+    /// and every panel button step around.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 /// The "folder pet": an always-on-top companion showing what trolley is doing.
 ///
 /// Main-thread only. The `observer` property bridges from the MCP thread by
@@ -72,6 +85,13 @@ public final class StatusWidgetController {
     private var pendingRequestID: String?
     private let onQuit: () -> Void
     private let onOpenSettings: (() -> Void)?
+    /// Hidden until an update is actually installable; see `showUpdate`.
+    private let updateBadge = UpdateBadgeButton()
+    /// What the badge and the panel's button both call. The widget knows nothing
+    /// about feeds -- it reports that a person asked and lets the app decide.
+    public var onUpdateAction: (() -> Void)? {
+        didSet { activityPanel.onUpdateAction = onUpdateAction }
+    }
 
     /// - Parameter onQuit: what "위젯 종료" does. Injected so this module never
     ///   decides how the process dies.
@@ -111,6 +131,7 @@ public final class StatusWidgetController {
         panel.contentView = iconView
         activityPanel = ActivityPanelController(attachedTo: panel)
 
+        buildUpdateBadge()
         iconView.onClick = { [weak self] in self?.toggleActivityPanel() }
         iconView.onRightClick = { [weak self] event in self?.showMenu(for: event) }
         activityPanel.onSubmitPrompt = { [weak self] text in
@@ -410,6 +431,46 @@ public final class StatusWidgetController {
             isRefresh: alreadyToldThisOne && !isSameContent,
             capped: !isSameContent && WikiContext.shared.isRefreshCapped(conversationID: conversationID)
         )
+    }
+
+    private func buildUpdateBadge() {
+        let diameter: CGFloat = 34
+        updateBadge.frame = NSRect(
+            x: (Self.widgetSize - diameter) / 2,
+            y: (Self.widgetSize - diameter) / 2,
+            width: diameter,
+            height: diameter
+        )
+        updateBadge.isBordered = false
+        updateBadge.bezelStyle = .inline
+        updateBadge.imagePosition = .imageOnly
+        updateBadge.image = NSImage(
+            systemSymbolName: "arrow.down.circle.fill",
+            accessibilityDescription: "업데이트 설치"
+        )
+        updateBadge.image?.isTemplate = false
+        updateBadge.contentTintColor = .controlAccentColor
+        updateBadge.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 30, weight: .semibold)
+        updateBadge.target = self
+        updateBadge.action = #selector(updateBadgeTapped)
+        updateBadge.isHidden = true
+        iconView.addSubview(updateBadge)
+    }
+
+    @objc private func updateBadgeTapped() {
+        onUpdateAction?()
+    }
+
+    /// Shows the update state in both places the user might be looking.
+    ///
+    /// The badge appears only for a finished download. An update that is merely
+    /// *known about* is not yet actionable -- covering the pet with a button that
+    /// means "wait" would take the face away and give nothing back.
+    public func showUpdate(status: UpdateStatus) {
+        updateBadge.isHidden = !status.deservesAttention
+        updateBadge.toolTip = status.summary
+        activityPanel.showUpdate(status: status)
+        activityPanel.refreshIfVisible(makePanelModel())
     }
 
     /// Starts listening for prompts sent by `trolley prompt`.

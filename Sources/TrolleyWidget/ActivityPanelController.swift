@@ -136,6 +136,13 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         didSet { settingsButton.isHidden = onOpenSettings == nil }
     }
 
+    /// Pressed by "업데이트 확인", and by the pet's badge when a download is
+    /// ready. The panel neither checks nor installs -- it only says a person
+    /// asked, which is what keeps the network out of this file.
+    var onUpdateAction: (() -> Void)? {
+        didSet { updateButton.isHidden = onUpdateAction == nil }
+    }
+
     private let panel: NSPanel
     private let widgetPanel: NSPanel
     private let stack = NSStackView()
@@ -185,6 +192,7 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
     private let llmStatusLabel = ActivityPanelController.makeLabel(Style.caption, .secondaryLabelColor)
     private let stopButton = PanelButton()
     private let settingsButton = PanelButton()
+    private let updateButton = NSButton()
 
     private let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -320,6 +328,22 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         onOpenSettings?()
     }
 
+    @objc private func updateTapped() {
+        onUpdateAction?()
+    }
+
+    /// Retitles the button from the status. A finished download turns it into
+    /// the install action; everything else leaves it as the check it was, so the
+    /// button never disappears out from under a cursor already on its way.
+    func showUpdate(status: UpdateStatus) {
+        updateButton.title = status.actionTitle ?? "업데이트 확인"
+        updateButton.toolTip = status.summary
+        // Only a ready install is worth colouring. Tinting a routine check would
+        // spend the one bit of emphasis this row has on nothing.
+        updateButton.bezelColor = status.deservesAttention ? .controlAccentColor : nil
+        updateButton.isEnabled = status != .checking
+    }
+
     func hide() {
         releaseFocus()
         widgetPanel.removeChildWindow(panel)
@@ -370,10 +394,25 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         // Until a host assigns the callback there is nothing behind it.
         settingsButton.isHidden = true
 
+        // Bordered, unlike the two icons beside it: this one is a verb rather
+        // than a destination, and the border is what says it can be pressed. The
+        // icons get away without one because their symbols are already known.
+        updateButton.title = "업데이트 확인"
+        updateButton.font = Style.caption
+        updateButton.bezelStyle = .rounded
+        updateButton.controlSize = .small
+        updateButton.toolTip = UpdateStatus.upToDate.summary
+        updateButton.target = self
+        updateButton.action = #selector(updateTapped)
+        updateButton.setContentHuggingPriority(.required, for: .horizontal)
+        // Nothing behind it until a host wires the callback -- same rule as the
+        // gear, so `trolley mcp --widget` does not offer an update it cannot do.
+        updateButton.isHidden = true
+
         // Top left, ahead of the title: where a window's close button lives. The
         // gear sits beside it because the pet's right-click menu was the only
         // way in, and a menu you have to know about is not a way in.
-        let leading = NSStackView(views: [close, settingsButton, title])
+        let leading = NSStackView(views: [close, settingsButton, title, updateButton])
         leading.orientation = .horizontal
         leading.alignment = .centerY
         leading.spacing = 6

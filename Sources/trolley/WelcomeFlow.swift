@@ -18,6 +18,10 @@ enum WelcomeFlow {
     /// Held for the life of the process: this static is the only strong reference
     /// to the status item, and to the target every menu item points at weakly.
     private static var menuBar: MenuBarController?
+    /// Owns the six-hour timer. Held for the same reason as the others: dropping
+    /// it cancels the schedule, and a checker that stops after one run is worse
+    /// than none because it looks like it is working.
+    private static var updates: UpdateCoordinator?
 
     /// launchd sets `__CFBundleIdentifier` to the identifier of the bundle it
     /// opened. Merely being set is not enough to go on: Terminal exports its own
@@ -64,7 +68,13 @@ enum WelcomeFlow {
                 (SystemTrustChecker().isProcessTrusted(), CGPreflightScreenCaptureAccess())
             },
             localLLM: LocalLLMSession(toolRunner: runner),
-            onQuit: { NSApp.terminate(nil) },
+            // A verified download is a whole app bundle. Dropping it on the way
+            // out costs a re-fetch that the next six-hour check would have made
+            // anyway, and saves leaving hundreds of megabytes beside the install.
+            onQuit: {
+                updates?.discardStaged()
+                NSApp.terminate(nil)
+            },
             onOpenSettings: { openSetup() }
         )
         widget = controller
@@ -72,6 +82,8 @@ enum WelcomeFlow {
         // installed later would miss a prompt typed the moment the app came up.
         controller.acceptRemotePrompts()
         controller.show()
+
+        startUpdateChecks(reporting: controller)
 
         // The menu bar is the way in for someone who has not been told the folder
         // on screen is clickable. Only the app installs one -- `trolley mcp
@@ -108,6 +120,46 @@ enum WelcomeFlow {
         // the transition.
         introduceIfFirstTime(readyNow: SetupWindowController.isEverythingReady())
         app.run()
+    }
+
+    /// Wires the update checker to the widget and starts its schedule.
+    ///
+    /// Only the app does this. `trolley mcp --widget` draws the same pet but must
+    /// not replace the binary underneath a client that is mid-call, and the CLI
+    /// has `trolley update` for the same job done deliberately.
+    private static func startUpdateChecks(reporting controller: StatusWidgetController) {
+        guard let current = SemanticVersion(TrolleyVersion.current) else { return }
+        let layout = InstallLayout.detect(
+            executablePath: AccessibilityPermission.currentExecutablePath()
+        )
+        let coordinator = UpdateCoordinator(current: current, layout: layout)
+        coordinator.onChange = { status in controller.showUpdate(status: status) }
+        controller.onUpdateAction = { installOrCheck(coordinator, reporting: controller) }
+        updates = coordinator
+        coordinator.start()
+    }
+
+    /// One button, two meanings, decided by what is actually in hand: install
+    /// what has been fetched, or -- when nothing has -- go and look.
+    private static func installOrCheck(
+        _ coordinator: UpdateCoordinator, reporting controller: StatusWidgetController
+    ) {
+        do {
+            guard try coordinator.installStaged() != nil else {
+                coordinator.checkNow()
+                return
+            }
+        } catch {
+            controller.showUpdate(status: .failed(String(describing: error)))
+            return
+        }
+        // The swap gave the path a new inode, so this process is still running
+        // the old copy and cannot become the new one. Schedule the reopen, then
+        // leave -- `open -a` while we are still alive would only activate us.
+        if UpdatePolicy.default.relaunchesAutomatically {
+            TrolleyRelaunch.scheduleRelaunch(bundlePath: coordinator.installedPath)
+        }
+        NSApp.terminate(nil)
     }
 
     /// Opens the prompt box once, ever, so the first thing someone sees after
