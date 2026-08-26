@@ -63,6 +63,9 @@ struct McpCommand: ParsableCommand {
                 (SystemTrustChecker().isProcessTrusted(), CGPreflightScreenCaptureAccess())
             },
             promptQueue: promptQueue,
+            // This process serves `take_prompt` itself, so the panel's agent
+            // destination has a reader here -- unlike in the app.
+            agentReaderAvailable: true,
             onQuit: {
                 log("trolley mcp: quitting (widget menu)")
                 Darwin.exit(0)
@@ -146,7 +149,24 @@ struct McpCommand: ParsableCommand {
                         )
                     }
             },
-            promptQueue: promptQueue
+            promptQueue: promptQueue,
+            // Only when a folder has actually been pointed at. `rootPath` always has a
+            // value -- it falls back to a sensible guess -- so the test is whether that
+            // folder is really there, not whether the setting is non-empty.
+            wiki: Self.wikiTools()
         )
+    }
+
+    private static func wikiTools() -> WikiTools? {
+        // The same switch that governs the widget's digest. "위키 참고: 꺼짐" has to mean
+        // one thing, not "off for my questions but still listed for the agent" -- and a
+        // tool list that changes with a setting the person did not think applied to it
+        // is worse than either behaviour on its own.
+        guard WikiSettings.isEnabled, let root = WikiSettings.rootURL else { return nil }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory),
+              isDirectory.boolValue
+        else { return nil }
+        return WikiTools()
     }
 }

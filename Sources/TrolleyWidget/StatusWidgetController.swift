@@ -1,4 +1,5 @@
 import AppKit
+import TrolleyKit
 import TrolleyMCP
 
 /// A floating panel that must never take keyboard focus away from the app
@@ -58,6 +59,21 @@ public final class StatusWidgetController {
     private let sessionStartedAt = Date()
     private let permissions: () -> (ax: Bool, screenRecording: Bool)
     private let promptQueue: PromptQueue
+    private let localLLM: LocalLLMSession
+    private var cachedWikiBadge: WikiBadge?
+    private var lastWikiBadgeCheck: Date?
+    private let agentReaderAvailable: Bool
+    /// One-shot observer for `presentPromptPanel(focus:)`; see there.
+    private var activationObserver: NSObjectProtocol?
+    /// What the user last picked. Not necessarily where prompts go -- see
+    /// `effectiveDestination`.
+    private var storedDestination = PromptDestination.stored
+    /// Where a prompt actually goes. In the app the agent queue has no reader, so
+    /// a `.agent` left in `UserDefaults` by an earlier `trolley mcp --widget`
+    /// session must not be honoured here.
+    private var effectiveDestination: PromptDestination {
+        .effective(stored: storedDestination, agentReaderAvailable: agentReaderAvailable)
+    }
     private let onQuit: () -> Void
     private let onOpenSettings: (() -> Void)?
 
@@ -68,14 +84,23 @@ public final class StatusWidgetController {
     ///   on stdin EOF.
     /// - Parameter onOpenSettings: shown in the menu when the host has a setup
     ///   window to offer. Omitted by a server that only draws the widget.
+    /// - Parameter localLLM: the model side of the same box. Injected so tests
+    ///   and the CLI can hand in one that talks to nothing.
+    /// - Parameter agentReaderAvailable: whether this process also serves
+    ///   `take_prompt`. Only `trolley mcp --widget` does; the app never does, and
+    ///   the panel says so rather than letting prompts pile up unread.
     public init(
         permissions: @escaping () -> (ax: Bool, screenRecording: Bool),
         promptQueue: PromptQueue = PromptQueue(),
+        localLLM: LocalLLMSession = LocalLLMSession(),
+        agentReaderAvailable: Bool = false,
         onQuit: @escaping () -> Void = { NSApplication.shared.terminate(nil) },
         onOpenSettings: (() -> Void)? = nil
     ) {
         self.permissions = permissions
         self.promptQueue = promptQueue
+        self.localLLM = localLLM
+        self.agentReaderAvailable = agentReaderAvailable
         self.onQuit = onQuit
         self.onOpenSettings = onOpenSettings
 
@@ -104,6 +129,26 @@ public final class StatusWidgetController {
         iconView.onRightClick = { [weak self] event in self?.showMenu(for: event) }
         activityPanel.onSubmitPrompt = { [weak self] text in
             self?.submitPrompt(text)
+        }
+        activityPanel.onChangeDestination = { [weak self] destination in
+            guard let self else { return }
+            self.storedDestination = destination
+            PromptDestination.stored = destination
+            self.activityPanel.refreshIfVisible(self.makePanelModel())
+        }
+        activityPanel.onCancelGeneration = { [weak self] in
+            self?.localLLM.cancel()
+        }
+        // Same action as the pet's menu item, in the place someone looks first.
+        // Assigned only when the host has a window, which is what decides
+        // whether the gear appears.
+        if onOpenSettings != nil {
+            activityPanel.onOpenSettings = { [weak self] in self?.onOpenSettings?() }
+        }
+        // Tokens arrive one at a time on the main queue; each one is a repaint.
+        localLLM.onChange = { [weak self] in
+            guard let self else { return }
+            self.activityPanel.refreshIfVisible(self.makePanelModel())
         }
         // The agent drains from the MCP thread; without this the panel would go
         // on listing prompts that have already been collected.
@@ -289,6 +334,44 @@ public final class StatusWidgetController {
         activityPanel.toggle(makePanelModel())
     }
 
+    /// Open the prompt box from outside the widget -- the menu bar's "물어보기",
+    /// and the setup window's "지금 물어보기".
+    ///
+    /// - Parameter focus: put the caret in the box. True when the user asked for
+    ///   this in so many words; false when something else opened it on their
+    ///   behalf, where taking the keyboard would be an interruption.
+    public func presentPromptPanel(focus: Bool) {
+        activityPanel.present(makePanelModel())
+        guard focus else { return }
+        if NSApp.isActive {
+            activityPanel.focusPromptField()
+            return
+        }
+        // Order matters: activate first, then take focus once the app is actually
+        // active. Doing it the other way round loses the caret, because becoming
+        // active makes AppKit re-decide which window is key. Clicking a status item
+        // does not activate the owning app, so this is the usual path.
+        // Held in a property rather than a local so the observer can remove itself:
+        // this fires once per request, and a second 물어보기 while the first is
+        // still pending must not stack another.
+        if let pending = activationObserver {
+            NotificationCenter.default.removeObserver(pending)
+        }
+        activationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            if let pending = self.activationObserver {
+                NotificationCenter.default.removeObserver(pending)
+                self.activationObserver = nil
+            }
+            self.activityPanel.focusPromptField()
+        }
+        NSApp.activate()
+    }
+
     private func makePanelModel() -> ActivityPanelModel {
         let grants = permissions()
         return ActivityPanelModel(
@@ -296,14 +379,66 @@ public final class StatusWidgetController {
             uptime: Date().timeIntervalSince(sessionStartedAt),
             axGranted: grants.ax,
             screenRecordingGranted: grants.screenRecording,
-            pendingPrompts: promptQueue.pendingPrompts
+            pendingPrompts: promptQueue.pendingPrompts,
+            destination: storedDestination,
+            llm: LocalLLMSnapshot(
+                prompt: localLLM.prompt,
+                // The denoising preview stands in until the first real token, so
+                // the box is never blank while the model is visibly working.
+                body: localLLM.answer.isEmpty ? localLLM.draft : localLLM.answer,
+                status: LocalLLMSession.statusLine(for: localLLM.phase, backend: localLLM.backend),
+                isBusy: localLLM.isBusy
+            ),
+            agentReaderAvailable: agentReaderAvailable,
+            wiki: wikiBadge()
         )
     }
 
-    /// Whitespace-only text is dropped by the queue, which is what makes a
-    /// stray ⏎ a no-op rather than a blank instruction to the agent.
+    /// What the wiki will contribute to the next question.
+    ///
+    /// Read from the same settings and index the send path uses, so the hint cannot
+    /// claim one thing while the request carries another. Nil whenever the wiki is off
+    /// or has nothing to say, which keeps the line unchanged for anyone not using it.
+    ///
+    /// Gated at 5 seconds like the setup window's rows, and for a sharper reason: this
+    /// is called from `makePanelModel`, which runs on **every arriving token**. Ungated
+    /// it would walk the wiki on the main thread throughout a streaming answer. The
+    /// digest itself only moves when a filter or a file does, so a stale-by-seconds
+    /// count is the right trade.
+    private func wikiBadge() -> WikiBadge? {
+        if let last = lastWikiBadgeCheck, Date().timeIntervalSince(last) < 5 {
+            return cachedWikiBadge
+        }
+        lastWikiBadgeCheck = Date()
+        cachedWikiBadge = computeWikiBadge()
+        return cachedWikiBadge
+    }
+
+    private func computeWikiBadge() -> WikiBadge? {
+        guard WikiSettings.isEnabled, let digest = WikiContext.shared.currentDigest(),
+              !digest.isEmpty
+        else { return nil }
+        let conversationID = LocalLLMSettings.conversationID
+        let sent = WikiSettings.sent
+        let alreadyToldThisOne = sent?.conversationID == conversationID
+        let isSameContent = alreadyToldThisOne && sent?.digestHash == digest.hash
+        return WikiBadge(
+            matched: digest.matched,
+            attaching: !isSameContent && !WikiContext.shared.isRefreshCapped(conversationID: conversationID),
+            isRefresh: alreadyToldThisOne && !isSameContent,
+            capped: !isSameContent && WikiContext.shared.isRefreshCapped(conversationID: conversationID)
+        )
+    }
+
+    /// Whitespace-only text is dropped by both destinations, which is what makes
+    /// a stray ⏎ a no-op rather than a blank instruction.
     private func submitPrompt(_ text: String) {
-        promptQueue.submit(text)
+        switch effectiveDestination {
+        case .localLLM:
+            localLLM.send(text)
+        case .agent:
+            promptQueue.submit(text)
+        }
     }
 
     /// Quitting is the only way to make the widget go away. Hiding used to live

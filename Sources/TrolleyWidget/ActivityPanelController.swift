@@ -1,5 +1,66 @@
 import AppKit
+import TrolleyKit
 import TrolleyMCP
+
+/// Where ⏎ in the prompt box sends what was typed.
+///
+/// Two destinations because they answer different questions. The local model is
+/// there right now and replies in the panel; the agent queue only pays off while
+/// an MCP client is actually attached and calling `take_prompt`. Defaulting to
+/// the model is what makes the box useful with nothing else running.
+public enum PromptDestination: String, CaseIterable {
+    case localLLM
+    case agent
+
+    var title: String {
+        switch self {
+        case .localLLM: return "로컬 LLM"
+        case .agent: return "에이전트"
+        }
+    }
+
+    var hint: String {
+        switch self {
+        case .localLLM: return "엔터를 누르면 답이 여기에 나옵니다"
+        case .agent: return "⏎ 로 대기열에 넣으면 에이전트가 take_prompt로 가져갑니다"
+        }
+    }
+
+    static var stored: PromptDestination {
+        get {
+            let raw = UserDefaults.standard.string(forKey: LocalLLMSettings.destinationKey) ?? ""
+            return PromptDestination(rawValue: raw) ?? .localLLM
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: LocalLLMSettings.destinationKey) }
+    }
+}
+
+/// What the wiki is contributing to the next question, flattened for the hint line.
+///
+/// Nil when the wiki is off or has nothing to add. Present-but-`attaching == false`
+/// means this conversation has already been given the list, which is the normal state
+/// after the first question and worth saying so it does not read as a failure.
+struct WikiBadge: Equatable {
+    let matched: Int
+    let attaching: Bool
+    let isRefresh: Bool
+    /// The wiki changed, but this conversation has had as many refreshes as it may get.
+    let capped: Bool
+}
+
+/// The local model's side of the panel, flattened for rendering. A snapshot
+/// rather than the session itself, so the panel cannot accidentally drive it.
+struct LocalLLMSnapshot {
+    let prompt: String
+    /// The answer so far, or the denoising preview while none has arrived.
+    let body: String
+    let status: String
+    let isBusy: Bool
+
+    var hasContent: Bool { !prompt.isEmpty }
+
+    static let empty = LocalLLMSnapshot(prompt: "", body: "", status: "", isBusy: false)
+}
 
 /// Everything the activity panel renders, assembled by the widget controller.
 struct ActivityPanelModel {
@@ -8,6 +69,16 @@ struct ActivityPanelModel {
     let axGranted: Bool
     let screenRecordingGranted: Bool
     let pendingPrompts: [PromptQueue.Prompt]
+    let destination: PromptDestination
+    let llm: LocalLLMSnapshot
+    /// Whether anything can actually call `take_prompt`. False in the app, whose
+    /// widget outlives every server: a server started while the app is up goes
+    /// headless and does not advertise the tool at all. Without this the agent
+    /// destination would queue into a box nobody opens.
+    let agentReaderAvailable: Bool
+    /// Only ever set for the local-model destination; the agent queue does not carry a
+    /// preamble.
+    let wiki: WikiBadge?
 }
 
 /// Fixed column widths for the call rows. The panel is a fixed width, so
@@ -60,14 +131,14 @@ private final class PromptTextField: NSTextField {
     }
 }
 
-/// The panel's own close button.
+/// Any button inside the panel.
 ///
-/// Clicking the folder again already closes the panel, but that is invisible
-/// until someone tries it. This is the same action with a target to aim at.
-private final class PanelCloseButton: NSButton {
-    /// The panel belongs to an inactive app, and without this the first click on
-    /// it is spent activating rather than pressing -- the same trap the prompt
-    /// field and the widget's own view have to step around.
+/// The panel belongs to an inactive app, and without `acceptsFirstMouse` the
+/// first click on one of these is spent activating rather than pressing -- the
+/// same trap the prompt field and the widget's own view have to step around.
+/// Every button here is one someone reaches for while working in another app,
+/// so losing the first click is losing the click.
+private final class PanelButton: NSButton {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
@@ -82,9 +153,23 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
     /// Enough to see the queue is real without letting it push the panel off
     /// screen; the count label carries the rest.
     private static let maxPendingRows = 3
+    /// Past this the answer scrolls. Chosen so the panel still fits above the
+    /// widget in its default bottom-right corner.
+    private static let maxAnswerHeight: CGFloat = 150
 
-    /// The user committed a prompt. The widget controller owns the queue.
+    /// The user committed a prompt. The widget controller owns both the queue
+    /// and the model session, and decides which one gets it.
     var onSubmitPrompt: ((String) -> Void)?
+    /// The destination switch moved.
+    var onChangeDestination: ((PromptDestination) -> Void)?
+    /// "중지" while the model is generating.
+    var onCancelGeneration: (() -> Void)?
+    /// Opens the setup window. Nil in a host that has none to offer -- a server
+    /// drawing its own widget -- and the gear is then not shown at all rather
+    /// than shown dead.
+    var onOpenSettings: (() -> Void)? {
+        didSet { settingsButton.isHidden = onOpenSettings == nil }
+    }
 
     private let panel: NSPanel
     private let widgetPanel: NSPanel
@@ -108,6 +193,16 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
     private let pendingCountLabel = ActivityPanelController.makeLabel(Style.caption, .secondaryLabelColor)
     private let pendingStack = NSStackView()
     private let promptField = PromptTextField()
+    private let destinationControl = NSSegmentedControl()
+    private let hintLabel = ActivityPanelController.makeLabel(Style.caption, .tertiaryLabelColor)
+    private let answerSeparator = ActivityPanelController.makeSeparator()
+    private let askedLabel = ActivityPanelController.makeLabel(Style.caption, .secondaryLabelColor)
+    private let answerScroll = NSScrollView()
+    private let answerText = NSTextView()
+    private var answerHeight: NSLayoutConstraint!
+    private let llmStatusLabel = ActivityPanelController.makeLabel(Style.caption, .secondaryLabelColor)
+    private let stopButton = PanelButton()
+    private let settingsButton = PanelButton()
 
     private let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -194,6 +289,41 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         }
     }
 
+    /// Open, and stay open. `toggle` is wrong for a menu command -- picking
+    /// "물어보기" twice would close the panel the second time, which reads as the
+    /// menu being broken.
+    func present(_ model: ActivityPanelModel) {
+        update(model)
+        guard !isVisible else { return }
+        position()
+        widgetPanel.addChildWindow(panel, ordered: .above)
+        panel.orderFront(nil)
+    }
+
+    /// Puts the caret in the prompt box.
+    ///
+    /// `becomesKeyOnlyIfNeeded` is the flag that makes this panel refuse key
+    /// status, which is what keeps it from stealing focus from the app trolley is
+    /// automating. It also makes a programmatic `makeKeyAndOrderFront` unreliable,
+    /// so it comes off for the length of this call and goes straight back on.
+    func focusPromptField() {
+        let restore = panel.becomesKeyOnlyIfNeeded
+        panel.becomesKeyOnlyIfNeeded = false
+        panel.makeKeyAndOrderFront(nil)
+        panel.makeFirstResponder(promptField)
+        // Activation lands asynchronously, and AppKit re-picks the key window when
+        // it does -- the same race `PromptTextField.mouseDown` has to step around.
+        // A field editor installed before that finishes ends up holding nothing,
+        // and the typing goes to the app the user came from.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.panel.isVisible else { return }
+            if self.panel.firstResponder !== self.panel.fieldEditor(false, for: self.promptField) {
+                self.panel.makeFirstResponder(self.promptField)
+            }
+            self.panel.becomesKeyOnlyIfNeeded = restore
+        }
+    }
+
     func refreshIfVisible(_ model: ActivityPanelModel) {
         guard isVisible else { return }
         update(model)
@@ -202,6 +332,10 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
 
     @objc private func closePanel() {
         hide()
+    }
+
+    @objc private func openSettings() {
+        onOpenSettings?()
     }
 
     func hide() {
@@ -225,7 +359,7 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         let title = Self.makeLabel(Style.title, .labelColor)
         title.stringValue = "trolley"
 
-        let close = PanelCloseButton()
+        let close = PanelButton()
         close.isBordered = false
         close.bezelStyle = .inline
         close.imagePosition = .imageOnly
@@ -239,8 +373,25 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         close.action = #selector(closePanel)
         close.setContentHuggingPriority(.required, for: .horizontal)
 
-        // Top left, ahead of the title: where a window's close button lives.
-        let leading = NSStackView(views: [close, title])
+        settingsButton.isBordered = false
+        settingsButton.bezelStyle = .inline
+        settingsButton.imagePosition = .imageOnly
+        settingsButton.image = NSImage(
+            systemSymbolName: "gearshape.fill",
+            accessibilityDescription: "설정 열기"
+        )
+        settingsButton.contentTintColor = .tertiaryLabelColor
+        settingsButton.toolTip = "설정 열기"
+        settingsButton.target = self
+        settingsButton.action = #selector(openSettings)
+        settingsButton.setContentHuggingPriority(.required, for: .horizontal)
+        // Until a host assigns the callback there is nothing behind it.
+        settingsButton.isHidden = true
+
+        // Top left, ahead of the title: where a window's close button lives. The
+        // gear sits beside it because the pet's right-click menu was the only
+        // way in, and a menu you have to know about is not a way in.
+        let leading = NSStackView(views: [close, settingsButton, title])
         leading.orientation = .horizontal
         leading.alignment = .centerY
         leading.spacing = 6
@@ -258,7 +409,7 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         permissions.spacing = 14
         stack.addArrangedSubview(permissions)
 
-        stack.addArrangedSubview(separator())
+        stack.addArrangedSubview(Self.makeSeparator())
 
         callsStack.orientation = .vertical
         callsStack.alignment = .leading
@@ -267,11 +418,27 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         emptyLabel.stringValue = "아직 툴 호출이 없습니다"
         stack.addArrangedSubview(emptyLabel)
 
-        stack.addArrangedSubview(separator())
+        stack.addArrangedSubview(Self.makeSeparator())
 
         let promptTitle = Self.makeLabel(Style.body, .labelColor)
         promptTitle.stringValue = "프롬프트"
         stack.addArrangedSubview(headerRow(promptTitle, pendingCountLabel))
+
+        destinationControl.segmentCount = PromptDestination.allCases.count
+        destinationControl.segmentStyle = .rounded
+        destinationControl.controlSize = .small
+        destinationControl.trackingMode = .selectOne
+        for (index, destination) in PromptDestination.allCases.enumerated() {
+            destinationControl.setLabel(destination.title, forSegment: index)
+            destinationControl.setWidth(Self.contentWidth / 2, forSegment: index)
+        }
+        // Hidden until a model says otherwise. `NSStackView` detaches hidden
+        // arranged subviews, so this costs no height in the app -- and starting
+        // hidden means the switch never flashes on during the first refresh.
+        destinationControl.isHidden = true
+        destinationControl.target = self
+        destinationControl.action = #selector(destinationChanged)
+        stack.addArrangedSubview(destinationControl)
 
         pendingStack.orientation = .vertical
         pendingStack.alignment = .leading
@@ -279,7 +446,6 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         stack.addArrangedSubview(pendingStack)
 
         promptField.font = Style.body
-        promptField.placeholderString = "에이전트에게 전할 말…"
         promptField.bezelStyle = .roundedBezel
         promptField.isBezeled = true
         promptField.focusRingType = .default
@@ -287,14 +453,64 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         promptField.target = self
         promptField.action = #selector(promptCommitted)
         // Committing only on ⏎ -- clicking away from a half-typed prompt must
-        // not queue it.
+        // not send it.
         promptField.cell?.sendsActionOnEndEditing = false
         stack.addArrangedSubview(promptField)
         promptField.widthAnchor.constraint(equalToConstant: Self.contentWidth).isActive = true
 
-        let hint = Self.makeLabel(Style.caption, .tertiaryLabelColor)
-        hint.stringValue = "⏎ 로 대기열에 넣으면 에이전트가 take_prompt로 가져갑니다"
-        stack.addArrangedSubview(hint)
+        hintLabel.lineBreakMode = .byWordWrapping
+        hintLabel.preferredMaxLayoutWidth = Self.contentWidth
+        hintLabel.widthAnchor.constraint(equalToConstant: Self.contentWidth).isActive = true
+        stack.addArrangedSubview(hintLabel)
+
+        buildAnswerBlock()
+    }
+
+    /// The model's reply, under the field rather than above it: a growing answer
+    /// must not push the box someone is typing into out from under the caret.
+    private func buildAnswerBlock() {
+        stack.addArrangedSubview(answerSeparator)
+
+        askedLabel.stringValue = ""
+        stack.addArrangedSubview(askedLabel)
+        askedLabel.widthAnchor.constraint(equalToConstant: Self.contentWidth).isActive = true
+
+        answerText.isEditable = false
+        // Selectable so an answer can be copied out; the panel is not a place to
+        // keep anything.
+        answerText.isSelectable = true
+        answerText.drawsBackground = false
+        answerText.font = Style.body
+        answerText.textColor = .labelColor
+        answerText.textContainerInset = NSSize(width: 0, height: 2)
+        answerText.isVerticallyResizable = true
+        answerText.isHorizontallyResizable = false
+        answerText.textContainer?.widthTracksTextView = true
+        answerText.textContainer?.containerSize = NSSize(
+            width: Self.contentWidth, height: .greatestFiniteMagnitude
+        )
+        answerScroll.documentView = answerText
+        answerScroll.drawsBackground = false
+        answerScroll.borderType = .noBorder
+        answerScroll.hasVerticalScroller = true
+        answerScroll.autohidesScrollers = true
+        answerScroll.translatesAutoresizingMaskIntoConstraints = false
+        answerHeight = answerScroll.heightAnchor.constraint(equalToConstant: 0)
+        NSLayoutConstraint.activate([
+            answerScroll.widthAnchor.constraint(equalToConstant: Self.contentWidth),
+            answerHeight
+        ])
+        stack.addArrangedSubview(answerScroll)
+
+        stopButton.isBordered = false
+        stopButton.bezelStyle = .inline
+        stopButton.title = "중지"
+        stopButton.font = Style.caption
+        stopButton.contentTintColor = .secondaryLabelColor
+        stopButton.target = self
+        stopButton.action = #selector(cancelGeneration)
+        stopButton.setContentHuggingPriority(.required, for: .horizontal)
+        stack.addArrangedSubview(headerRow(llmStatusLabel, stopButton, alignment: .centerY))
     }
 
     private func permissionPair(_ dot: NSTextField, _ name: NSTextField) -> NSStackView {
@@ -325,10 +541,10 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         return row
     }
 
-    private func separator() -> NSView {
+    private static func makeSeparator() -> NSView {
         let box = NSBox()
         box.boxType = .separator
-        box.widthAnchor.constraint(equalToConstant: Self.contentWidth).isActive = true
+        box.widthAnchor.constraint(equalToConstant: contentWidth).isActive = true
         return box
     }
 
@@ -345,14 +561,68 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         replaceRows(of: callsStack, with: model.log.entries.prefix(Self.maxRows).map(callRow))
         emptyLabel.isHidden = !model.log.entries.isEmpty
 
+        updatePromptSection(model)
+
+        panel.setContentSize(NSSize(width: Self.width, height: stack.fittingSize.height))
+    }
+
+    /// One of the two destinations is showing at a time: the agent queue, or the
+    /// model's reply. Showing both would double the panel's height for one line
+    /// of information that only ever applies to the half in use.
+    private func updatePromptSection(_ model: ActivityPanelModel) {
+        let section = PromptSectionState(model: model)
+        destinationControl.isHidden = !section.showsDestinationControl
+        destinationControl.selectedSegment = section.selectedSegment
+        hintLabel.stringValue = section.hint
+        hintLabel.textColor = section.hintIsWarning ? .systemOrange : .tertiaryLabelColor
+        hintLabel.maximumNumberOfLines = 2
+        promptField.placeholderString = section.placeholder
+
+        let agentMode = section.destination == .agent
         let pending = model.pendingPrompts
+
+        pendingCountLabel.isHidden = !agentMode
         pendingCountLabel.stringValue = pending.isEmpty ? "대기 없음" : "대기 \(pending.count)건"
         replaceRows(
             of: pendingStack,
-            with: pending.prefix(Self.maxPendingRows).map(pendingRow)
+            with: agentMode ? pending.prefix(Self.maxPendingRows).map(pendingRow) : []
         )
 
-        panel.setContentSize(NSSize(width: Self.width, height: stack.fittingSize.height))
+        let llm = model.llm
+        let showAnswer = section.showsAnswerBlock
+        answerSeparator.isHidden = !showAnswer
+        askedLabel.isHidden = !showAnswer
+        answerScroll.isHidden = !showAnswer
+        llmStatusLabel.isHidden = !showAnswer
+        llmStatusLabel.superview?.isHidden = !showAnswer
+        stopButton.isHidden = !section.showsStopButton
+
+        guard showAnswer else {
+            answerHeight.constant = 0
+            return
+        }
+        askedLabel.stringValue = "묻기: " + llm.prompt.replacingOccurrences(of: "\n", with: " ")
+        llmStatusLabel.stringValue = llm.status
+        setAnswer(llm.body, streaming: llm.isBusy)
+    }
+
+    /// Replaces the text only when it actually changed: assigning `string` on
+    /// every refresh would drop a selection the user had made in a finished
+    /// answer, and the panel refreshes on every tool call.
+    private func setAnswer(_ text: String, streaming: Bool) {
+        if answerText.string != text {
+            answerText.string = text
+            if streaming {
+                // Follow the tail while it is being written; a finished answer is
+                // left where the reader put it.
+                answerText.scrollToEndOfDocument(nil)
+            }
+        }
+        answerText.layoutManager?.ensureLayout(for: answerText.textContainer!)
+        let used = answerText.layoutManager?.usedRect(for: answerText.textContainer!).height ?? 0
+        // A floor so the box does not flicker into existence one line at a time,
+        // and a ceiling so a long answer scrolls instead of running off screen.
+        answerHeight.constant = min(max(used + 6, 34), Self.maxAnswerHeight)
     }
 
     private func replaceRows(of container: NSStackView, with rows: [NSView]) {
@@ -424,6 +694,16 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         onSubmitPrompt?(text)
     }
 
+    @objc private func destinationChanged() {
+        let index = destinationControl.selectedSegment
+        guard PromptDestination.allCases.indices.contains(index) else { return }
+        onChangeDestination?(PromptDestination.allCases[index])
+    }
+
+    @objc private func cancelGeneration() {
+        onCancelGeneration?()
+    }
+
     /// Escape gives the field back: clear a half-typed prompt, then close.
     func control(
         _ control: NSControl,
@@ -457,6 +737,29 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
 /// The panel's number formatting, kept free of AppKit so the awkward cases
 /// (an hour of uptime, a sub-millisecond call) are testable.
 enum PanelFormat {
+    /// The hint under the prompt box.
+    ///
+    /// Pure so the combinations are testable: the orphan-queue warning has to win over
+    /// everything, the agent destination never mentions the wiki because its prompts do
+    /// not carry one, and "already sent" has to read as normal rather than as a fault.
+    static func promptHint(
+        destination: PromptDestination, wiki: WikiBadge?, orphanQueue: Bool
+    ) -> String {
+        if orphanQueue {
+            return "가져갈 서버가 없습니다 — trolley.app 을 끄고 trolley mcp 로 띄워야 take_prompt 가 열립니다"
+        }
+        guard destination == .localLLM, let wiki else { return destination.hint }
+        if wiki.capped {
+            return destination.hint + " · 위키가 바뀌었습니다 (새 대화부터 반영)"
+        }
+        if wiki.attaching {
+            return destination.hint + (wiki.isRefresh
+                ? " · 위키 \(wiki.matched)건 다시 첨부"
+                : " · 위키 \(wiki.matched)건 첨부")
+        }
+        return destination.hint + " · 위키 \(wiki.matched)건 (이미 전달됨)"
+    }
+
     static func uptime(_ interval: TimeInterval) -> String {
         let total = max(0, Int(interval))
         let (hours, minutes, seconds) = (total / 3600, (total % 3600) / 60, total % 60)
