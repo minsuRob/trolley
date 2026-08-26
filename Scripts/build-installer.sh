@@ -112,18 +112,61 @@ notarize() {
         --wait
 }
 
-# Stapling routinely fails for a while after Accepted, and on this machine it
-# fails outright -- see README. Never fatal: without a staple Gatekeeper just
-# checks notarization online instead.
+# Writes the ticket stapler downloaded but refused to accept.
+#
+# On this machine `stapler staple` always ends in "Could not validate ticket"
+# (Error 65) -- for our bundles and for an already-notarized third-party app
+# alike, which is what places the fault here rather than in the artifact. The
+# download half still works: it asks Apple for the ticket matching the bundle's
+# cdhash and saves it. Only the local verification that follows is broken.
+#
+# So take the file it fetched and put it where stapler would have. Measured: the
+# result is byte-format identical to the ticket a shipped notarized app carries
+# (`s8ch` magic, CMS blob), the bundle's cdhash is unchanged, and the signature
+# still verifies -- `Contents/CodeResources` is outside the seal, which is how
+# stapling can happen after signing at all.
+staple_by_hand() {
+    local bundle="$1" ticket
+    [ -d "$bundle/Contents" ] || return 1
+    ticket=$(xcrun stapler staple -v "$bundle" 2>&1 \
+        | sed -n 's|.*Downloaded ticket has been stored at file://\(.*\)\.$|\1|p' | tail -1)
+    [ -n "$ticket" ] && [ -s "$ticket" ] || return 1
+    cp "$ticket" "$bundle/Contents/CodeResources" || return 1
+    # If this fails the ticket landed somewhere it does not belong; back it out
+    # rather than ship a bundle whose signature no longer checks.
+    if ! codesign --verify --strict "$bundle" >/dev/null 2>&1; then
+        rm -f "$bundle/Contents/CodeResources"
+        return 1
+    fi
+    return 0
+}
+
+# Two different failures wear the same exit code, and they want opposite things.
+#
+#   "no ticket / not yet available"  -- Apple has not published it yet. Wait.
+#   "Could not validate ticket"      -- the ticket arrived and the local check
+#                                       choked on it. Waiting changes nothing;
+#                                       this is the machine, not the clock.
+#
+# Reading the message is what keeps a build on this machine from spending four
+# minutes re-running a call that fails identically every time.
 staple_with_retry() {
-    local artifact="$1"
+    local artifact="$1" output
     for attempt in 1 2 3 4 5; do
-        if xcrun stapler staple "$artifact" >/dev/null 2>&1; then
+        output=$(xcrun stapler staple "$artifact" 2>&1) && {
             echo "==> 스테이플 완료: $(basename "$artifact")"
             return 0
-        fi
+        }
+        case "$output" in
+            *"Could not validate ticket"*) break ;;
+        esac
         [ "$attempt" -lt 5 ] && sleep 60
     done
+    if staple_by_hand "$artifact"; then
+        echo "==> 스테이플 완료(수동): $(basename "$artifact")"
+        echo "    stapler 의 검증 단계가 이 기계에서 실패해, 받아온 티켓을 직접 넣었습니다."
+        return 0
+    fi
     echo "==> 스테이플 실패: $(basename "$artifact") — 공증 자체는 유효합니다."
     echo "    나중에 다시: xcrun stapler staple $artifact"
     return 1
@@ -134,7 +177,15 @@ staple_with_retry() {
 mkdir -p "$DIST"
 ZIP="$DIST/trolley-app.zip"
 ditto -c -k --keepParent "$APP" "$ZIP"
-notarize "$ZIP" "앱" || true
+if notarize "$ZIP" "앱"; then
+    # Staple the bundle, not the zip -- an archive cannot carry a ticket, and the
+    # bundle is what has to launch on a Mac that is offline. Done here, before
+    # the disk image is built, so the app inside the dmg is stapled too.
+    staple_with_retry "$APP" || true
+    # Re-archive so `trolley update` ships the stapled bundle. Safe: the ticket
+    # is outside the seal, so the cdhash Apple notarized is unchanged.
+    ditto -c -k --keepParent "$APP" "$ZIP"
+fi
 
 # --- 4. Disk image ------------------------------------------------------------
 echo "==> dmg 생성"
