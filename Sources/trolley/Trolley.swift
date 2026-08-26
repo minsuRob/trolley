@@ -22,7 +22,6 @@ struct Trolley: ParsableCommand {
         version: TrolleyVersion.display,
         subcommands: [
             CheckPermissionsCommand.self,
-            McpCommand.self,
             AskCommand.self,
             PromptCommand.self,
             WikiCommand.self,

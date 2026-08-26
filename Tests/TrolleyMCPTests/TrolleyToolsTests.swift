@@ -16,7 +16,6 @@ final class TrolleyToolsTests: XCTestCase {
     private var keyPosterTargets: [pid_t?] = []
     private var clipboard = FakeClipboard()
     private var inputSource = FakeInputSource()
-    private var promptQueue: PromptQueue?
 
     private func makeTools() -> TrolleyTools {
         TrolleyTools(
@@ -38,7 +37,6 @@ final class TrolleyToolsTests: XCTestCase {
             },
             clipboard: clipboard,
             inputSource: inputSource,
-            promptQueue: promptQueue,
             executablePath: { "/tmp/trolley" },
             sleeper: { [weak self] seconds in self?.slept.append(seconds) }
         )
@@ -59,7 +57,6 @@ final class TrolleyToolsTests: XCTestCase {
         keyPosterTargets = []
         clipboard = FakeClipboard()
         inputSource = FakeInputSource()
-        promptQueue = nil
     }
 
     private func call(_ name: String, _ arguments: [String: JSONValue] = [:]) throws -> JSONValue {
@@ -629,12 +626,15 @@ final class TrolleyToolsTests: XCTestCase {
         XCTAssertEqual(result["capturedRegion"]?["width"]?.doubleValue, 4)
         XCTAssertEqual(result["format"]?.stringValue, "jpeg")
 
-        let blocks = try XCTUnwrap(result[MCPServer.extraContentKey]?.arrayValue)
-        XCTAssertEqual(blocks.first?["type"]?.stringValue, "image")
-        XCTAssertEqual(blocks.first?["mimeType"]?.stringValue, "image/jpeg")
-        let base64 = try XCTUnwrap(blocks.first?["data"]?.stringValue)
-        let data = try XCTUnwrap(Data(base64Encoded: base64))
-        XCTAssertEqual(Array(data.prefix(3)), [0xFF, 0xD8, 0xFF], "decodes to a real JPEG")
+        // No image bytes. They used to ride here under `_extraContent` for MCP's image
+        // content block, and the local model -- the only caller left -- cannot see an
+        // image at all. Worse, its tool results are JSON-encoded with sorted keys and cut
+        // at 4,000 characters: `_` sorts ahead of every lowercase key, so the base64 came
+        // first and pushed every real field past the cut. The model asked for a
+        // screenshot and reliably learned nothing.
+        let encoded = String(decoding: try JSONEncoder().encode(result), as: UTF8.self)
+        XCTAssertFalse(encoded.contains("_extraContent"), encoded)
+        XCTAssertLessThan(encoded.count, 400, "스크린샷 결과가 모델의 예산을 먹으면 안 된다")
     }
 
     func testScreenshotWithoutPermissionExplainsAndRequests() {
@@ -765,63 +765,5 @@ final class TrolleyToolsTests: XCTestCase {
                 XCTFail("\(tool.name) threw a non-ToolError: \(error)")
             }
         }
-    }
-}
-
-// MARK: - Widget prompt queue
-
-extension TrolleyToolsTests {
-    /// Headless has no prompt box, so advertising the tool would only invite a
-    /// call that can never return anything.
-    func testTakePromptIsAbsentWithoutAWidgetQueue() {
-        XCTAssertFalse(makeTools().tools.contains { $0.name == "take_prompt" })
-        XCTAssertThrowsError(try call("take_prompt"))
-    }
-
-    func testTakePromptReturnsQueuedPromptsOldestFirstAndClears() throws {
-        let queue = PromptQueue()
-        promptQueue = queue
-        queue.submit("첫 번째")
-        queue.submit("두 번째")
-        let tools = makeTools()
-
-        XCTAssertTrue(tools.tools.contains { $0.name == "take_prompt" })
-        let result = try tools.call(name: "take_prompt", arguments: .object([:]))
-
-        XCTAssertEqual(result["count"]?.intValue, 2)
-        XCTAssertEqual(
-            result["prompts"]?.arrayValue?.compactMap { $0["text"]?.stringValue },
-            ["첫 번째", "두 번째"]
-        )
-        XCTAssertEqual(queue.pendingCount, 0)
-        // Nothing left, so the result must not also claim something is waiting.
-        XCTAssertNil(result["userPromptWaiting"])
-    }
-
-    func testTakePromptOnAnEmptyQueueIsNotAnError() throws {
-        promptQueue = PromptQueue()
-
-        let result = try call("take_prompt")
-
-        XCTAssertEqual(result["count"]?.intValue, 0)
-        XCTAssertEqual(result["prompts"]?.arrayValue?.isEmpty, true)
-    }
-
-    /// The server cannot interrupt the agent, so a waiting prompt has to ride
-    /// out on the next result the agent reads anyway.
-    func testOtherToolResultsAnnounceWaitingPrompts() throws {
-        let queue = PromptQueue()
-        promptQueue = queue
-        queue.submit("멈춰")
-
-        let result = try call("check_permissions")
-
-        XCTAssertEqual(result["userPromptWaiting"]?.stringValue?.contains("take_prompt"), true)
-    }
-
-    func testResultsCarryNoAnnouncementWhenNothingIsWaiting() throws {
-        promptQueue = PromptQueue()
-
-        XCTAssertNil(try call("check_permissions")["userPromptWaiting"])
     }
 }

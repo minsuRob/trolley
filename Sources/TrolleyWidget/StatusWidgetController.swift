@@ -58,11 +58,9 @@ public final class StatusWidgetController {
     private var badgeTimer: DispatchWorkItem?
     private let sessionStartedAt = Date()
     private let permissions: () -> (ax: Bool, screenRecording: Bool)
-    private let promptQueue: PromptQueue
     private let localLLM: LocalLLMSession
     private var cachedWikiBadge: WikiBadge?
     private var lastWikiBadgeCheck: Date?
-    private let agentReaderAvailable: Bool
     /// One-shot observer for `presentPromptPanel(focus:)`; see there.
     private var activationObserver: NSObjectProtocol?
     /// Held for the life of the controller: `PromptBridge` is how `trolley prompt`
@@ -72,42 +70,23 @@ public final class StatusWidgetController {
     /// soon as it is answered so a later question typed into the box does not report
     /// back to a CLI that has long since exited.
     private var pendingRequestID: String?
-    /// What the user last picked. Not necessarily where prompts go -- see
-    /// `effectiveDestination`.
-    private var storedDestination = PromptDestination.stored
-    /// Where a prompt actually goes. In the app the agent queue has no reader, so
-    /// a `.agent` left in `UserDefaults` by an earlier `trolley mcp --widget`
-    /// session must not be honoured here.
-    private var effectiveDestination: PromptDestination {
-        .effective(stored: storedDestination, agentReaderAvailable: agentReaderAvailable)
-    }
     private let onQuit: () -> Void
     private let onOpenSettings: (() -> Void)?
 
-    /// - Parameter promptQueue: shared with the tool provider -- the panel's
-    ///   prompt box is the writer, `take_prompt` the reader.
     /// - Parameter onQuit: what "위젯 종료" does. Injected so this module never
-    ///   decides how the process dies -- `trolley mcp` exits the same way it does
-    ///   on stdin EOF.
+    ///   decides how the process dies.
     /// - Parameter onOpenSettings: shown in the menu when the host has a setup
     ///   window to offer. Omitted by a server that only draws the widget.
     /// - Parameter localLLM: the model side of the same box. Injected so tests
     ///   and the CLI can hand in one that talks to nothing.
-    /// - Parameter agentReaderAvailable: whether this process also serves
-    ///   `take_prompt`. Only `trolley mcp --widget` does; the app never does, and
-    ///   the panel says so rather than letting prompts pile up unread.
     public init(
         permissions: @escaping () -> (ax: Bool, screenRecording: Bool),
-        promptQueue: PromptQueue = PromptQueue(),
         localLLM: LocalLLMSession = LocalLLMSession(),
-        agentReaderAvailable: Bool = false,
         onQuit: @escaping () -> Void = { NSApplication.shared.terminate(nil) },
         onOpenSettings: (() -> Void)? = nil
     ) {
         self.permissions = permissions
-        self.promptQueue = promptQueue
         self.localLLM = localLLM
-        self.agentReaderAvailable = agentReaderAvailable
         self.onQuit = onQuit
         self.onOpenSettings = onOpenSettings
 
@@ -137,12 +116,6 @@ public final class StatusWidgetController {
         activityPanel.onSubmitPrompt = { [weak self] text in
             self?.submitPrompt(text)
         }
-        activityPanel.onChangeDestination = { [weak self] destination in
-            guard let self else { return }
-            self.storedDestination = destination
-            PromptDestination.stored = destination
-            self.activityPanel.refreshIfVisible(self.makePanelModel())
-        }
         activityPanel.onCancelGeneration = { [weak self] in
             self?.localLLM.cancel()
         }
@@ -168,14 +141,6 @@ public final class StatusWidgetController {
             self.activityPanel.refreshIfVisible(self.makePanelModel())
             self.reportIfSettled()
         }
-        // The agent drains from the MCP thread; without this the panel would go
-        // on listing prompts that have already been collected.
-        promptQueue.onChange = { [weak self] in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.activityPanel.refreshIfVisible(self.makePanelModel())
-            }
-        }
 
         NotificationCenter.default.addObserver(
             forName: NSWindow.didMoveNotification,
@@ -193,7 +158,7 @@ public final class StatusWidgetController {
         ) { [weak self] _ in self?.reassertVisibility() }
     }
 
-    /// The bridge handed to `MCPServer`. Fires on the MCP thread.
+    /// The bridge handed to the tool runner. Fires off the main thread.
     public var observer: ToolCallObserver {
         ToolCallObserver(
             toolCallStarted: { name in
@@ -397,8 +362,6 @@ public final class StatusWidgetController {
             uptime: Date().timeIntervalSince(sessionStartedAt),
             axGranted: grants.ax,
             screenRecordingGranted: grants.screenRecording,
-            pendingPrompts: promptQueue.pendingPrompts,
-            destination: storedDestination,
             llm: LocalLLMSnapshot(
                 prompt: localLLM.prompt,
                 // The denoising preview stands in until the first real token, so
@@ -409,7 +372,6 @@ public final class StatusWidgetController {
                 status: LocalLLMSession.statusLine(for: localLLM.phase, backend: localLLM.backend),
                 isBusy: localLLM.isBusy
             ),
-            agentReaderAvailable: agentReaderAvailable,
             wiki: wikiBadge()
         )
     }
@@ -498,15 +460,10 @@ public final class StatusWidgetController {
         }
     }
 
-    /// Whitespace-only text is dropped by both destinations, which is what makes
-    /// a stray ⏎ a no-op rather than a blank instruction.
+    /// Whitespace-only text is dropped by the session, which is what makes a stray ⏎
+    /// a no-op rather than a blank instruction.
     private func submitPrompt(_ text: String) {
-        switch effectiveDestination {
-        case .localLLM:
-            localLLM.send(text)
-        case .agent:
-            promptQueue.submit(text)
-        }
+        localLLM.send(text)
     }
 
     /// Quitting is the only way to make the widget go away. Hiding used to live

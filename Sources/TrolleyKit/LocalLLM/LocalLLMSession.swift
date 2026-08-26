@@ -8,8 +8,7 @@ import Foundation
 /// question go anywhere, and what came back".
 ///
 /// Main-thread only, like the widget it feeds. `LocalLLMClient` delivers every
-/// callback on the main queue, so nothing here needs a lock -- unlike
-/// `PromptQueue`, which the MCP thread drains.
+/// callback on the main queue, so nothing here needs a lock.
 public final class LocalLLMSession {
     public enum Phase: Equatable {
         case idle
@@ -102,8 +101,7 @@ public final class LocalLLMSession {
         }
     }
 
-    /// Whitespace-only text is dropped, matching `PromptQueue` -- a stray ⏎ is a
-    /// no-op wherever the box is pointed.
+    /// Whitespace-only text is dropped -- a stray ⏎ is a no-op.
     @discardableResult
     public func send(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -14,7 +14,6 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     private let locationRow = SetupRow(title: SetupCopy.locationTitle)
     private let accessibilityRow = SetupRow(title: SetupCopy.accessibilityTitle)
     private let screenRow = SetupRow(title: SetupCopy.screenRecordingTitle)
-    private let mcpRow = SetupRow(title: SetupCopy.mcpTitle)
     private let llmRow = SetupRow(title: SetupCopy.llmTitle)
     private let wikiRow = SetupRow(title: "LLM 위키")
     private var refreshTimer: Timer?
@@ -48,9 +47,6 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     /// Both cached because they shell out; the timer must not run them twice a
     /// second. Re-checked on a slower beat so registering from a terminal still
     /// turns the row green without relaunching.
-    private var mcpRegistered: Bool?
-    private var lastMCPCheck: Date?
-    private var mcpCheckInFlight = false
     private var claudePath: String??
 
     /// One controller for the life of the window, like the setup window itself: a
@@ -220,7 +216,7 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         detailsGroup.orientation = .vertical
         detailsGroup.alignment = .leading
         detailsGroup.spacing = 10
-        for view in [mcpRow, detailsGrid, copy] {
+        for view in [detailsGrid, copy] {
             detailsGroup.addArrangedSubview(view)
         }
     }
@@ -277,7 +273,6 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
             self?.requestScreenRecording()
         }
 
-        refreshMCPRow()
         refreshLLMRow()
         refreshWikiRow()
         refreshDetailsGrid()
@@ -368,7 +363,6 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
             path: executablePath,
             model: model,
             address: LocalLLMSettings.baseURLString,
-            registered: mcpRegistered
         )
     }
 
@@ -519,45 +513,6 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         }
     }
 
-    /// Optional by design: trolley works as a CLI without it, and someone who
-    /// wants to connect Claude Code later should not be looking at a red dot in
-    /// the meantime.
-    private func refreshMCPRow() {
-        guard let claude = locateClaude() else {
-            apply(SetupCopy.mcp(claudeFound: false, registered: nil), to: mcpRow) { [weak self] in
-                self?.copyManualCommand()
-            }
-            return
-        }
-        apply(
-            SetupCopy.mcp(claudeFound: true, registered: mcpRegistered), to: mcpRow
-        ) { [weak self] in
-            self?.registerMCP(claude: claude)
-        }
-        checkRegistrationIfDue(claude: claude)
-    }
-
-    /// Re-asks every few seconds rather than once per launch, so a registration
-    /// made in a terminal shows up here without a relaunch.
-    private func checkRegistrationIfDue(claude: String) {
-        guard !mcpCheckInFlight else { return }
-        if let last = lastMCPCheck, Date().timeIntervalSince(last) < 4 { return }
-        mcpCheckInFlight = true
-        lastMCPCheck = Date()
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            let listed = Self.run(claude, ["mcp", "list"])
-            let registered = MCPRegistration.isRegistered(listOutput: listed.output)
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.mcpCheckInFlight = false
-                if self.mcpRegistered != registered {
-                    self.mcpRegistered = registered
-                    self.refreshMCPRow()
-                }
-            }
-        }
-    }
-
     /// Looked up once and remembered -- including the answer "not installed", so
     /// a missing CLI does not spawn a login shell on every tick.
     private func locateClaude() -> String? {
@@ -608,33 +563,7 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         open("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
     }
 
-    private func registerMCP(claude: String) {
-        let path = executablePath
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            // Replacing rather than adding twice: re-running after a move has to
-            // overwrite the stale path, and `add` alone refuses.
-            _ = Self.run(claude, MCPRegistration.removeArguments())
-            let result = Self.run(claude, MCPRegistration.addArguments(executablePath: path))
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if result.status == 0 {
-                    self.mcpRegistered = true
-                    self.refreshMCPRow()
-                } else {
-                    self.present(
-                        title: "등록에 실패했습니다",
-                        message: result.output.isEmpty ? "claude가 \(result.status)로 끝났습니다." : result.output,
-                        critical: true
-                    )
-                }
-            }
-        }
-    }
 
-    private func copyManualCommand() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(MCPRegistration.manualCommand(executablePath: executablePath), forType: .string)
-    }
 
     // MARK: - Helpers
 

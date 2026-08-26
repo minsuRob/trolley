@@ -113,55 +113,23 @@ final class PromptHintTests: XCTestCase {
 
     /// Nobody using the wiki should see the line change at all.
     func testHintIsUnchangedWithoutAWiki() {
-        XCTAssertEqual(
-            PanelFormat.promptHint(destination: .localLLM, wiki: nil, orphanQueue: false),
-            PromptDestination.localLLM.hint
-        )
+        XCTAssertEqual(PanelFormat.promptHint(wiki: nil), PanelFormat.plainHint)
     }
 
     func testAttachingSaysHowManyPagesRideAlong() {
-        let hint = PanelFormat.promptHint(destination: .localLLM, wiki: badge(), orphanQueue: false)
-        XCTAssertTrue(hint.hasPrefix(PromptDestination.localLLM.hint))
+        let hint = PanelFormat.promptHint(wiki: badge())
+        XCTAssertTrue(hint.hasPrefix(PanelFormat.plainHint))
         XCTAssertTrue(hint.contains("위키 40건 첨부"))
     }
 
     func testRefreshIsDistinguishedFromAFirstAttach() {
-        let hint = PanelFormat.promptHint(
-            destination: .localLLM, wiki: badge(isRefresh: true), orphanQueue: false
-        )
-        XCTAssertTrue(hint.contains("다시 첨부"))
+        XCTAssertTrue(PanelFormat.promptHint(wiki: badge(isRefresh: true)).contains("다시 첨부"))
     }
 
     /// The normal state after the first question of a conversation. It has to read as
     /// ordinary, not as something having gone wrong.
     func testAlreadySentReadsAsNormal() {
-        let hint = PanelFormat.promptHint(
-            destination: .localLLM, wiki: badge(attaching: false), orphanQueue: false
-        )
-        XCTAssertTrue(hint.contains("이미 전달됨"))
-        XCTAssertFalse(hint.contains("첨부"))
-    }
-
-    func testCappedTellsYouToStartANewConversation() {
-        let hint = PanelFormat.promptHint(
-            destination: .localLLM, wiki: badge(attaching: false, capped: true), orphanQueue: false
-        )
-        XCTAssertTrue(hint.contains("새 대화부터 반영"))
-    }
-
-    /// The agent queue does not carry a preamble, so mentioning the wiki there would be
-    /// a claim about something that is not happening.
-    func testAgentDestinationNeverMentionsTheWiki() {
-        XCTAssertEqual(
-            PanelFormat.promptHint(destination: .agent, wiki: badge(), orphanQueue: false),
-            PromptDestination.agent.hint
-        )
-    }
-
-    /// A queue nobody can drain is the more urgent thing to say.
-    func testOrphanQueueWarningWinsOverEverything() {
-        let hint = PanelFormat.promptHint(destination: .agent, wiki: badge(), orphanQueue: true)
-        XCTAssertTrue(hint.contains("가져갈 서버가 없습니다"))
-        XCTAssertFalse(hint.contains("위키"))
+        let hint = PanelFormat.promptHint(wiki: badge(attaching: false))
+        XCTAssertTrue(hint.contains("이미 전달됨"), hint)
     }
 }

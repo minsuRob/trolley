@@ -50,17 +50,6 @@ final class SetupCopyTests: XCTestCase {
         }
     }
 
-    func testMCPRowIsOptionalUntilItIsConnected() {
-        XCTAssertEqual(SetupCopy.mcp(claudeFound: false, registered: nil).button, "명령 복사")
-        XCTAssertEqual(SetupCopy.mcp(claudeFound: true, registered: false).state, .optional)
-        XCTAssertEqual(SetupCopy.mcp(claudeFound: true, registered: true).state, .done)
-        // Never orange or red: someone who does not use Claude Code must not be
-        // looking at a warning about it.
-        for registered in [nil, false, true] {
-            let state = SetupCopy.mcp(claudeFound: true, registered: registered).state
-            XCTAssertTrue(state == .optional || state == .done, "\(state)")
-        }
-    }
 
     // MARK: - The point of the change
 
@@ -68,7 +57,9 @@ final class SetupCopyTests: XCTestCase {
     /// reads may contain developer vocabulary. `details(...)` is exempt -- that
     /// table is what you paste into a bug report.
     func testNoRowLeaksJargon() {
-        let banned = ["MCP", "스코프", "AX", "http", "/Applications/", "take_prompt", "툴"]
+        // "MCP", "스코프", "take_prompt" left the list with the code that could have
+        // produced them -- a banned word with no possible source is not a test.
+        let banned = ["AX", "http", "/Applications/", "툴"]
         var rows: [SetupCopy.RowContent] = [
             SetupCopy.accessibility(granted: true), SetupCopy.accessibility(granted: false),
             SetupCopy.screenRecording(granted: true), SetupCopy.screenRecording(granted: false),
@@ -87,13 +78,6 @@ final class SetupCopyTests: XCTestCase {
         }
     }
 
-    /// The one deliberate exception, stated as a test so nobody "fixes" it.
-    func testClaudeCodeRowMayNameClaudeCode() {
-        let detail = SetupCopy.mcp(claudeFound: true, registered: true).detail
-        XCTAssertTrue(detail.contains("Claude Code"))
-        XCTAssertFalse(detail.contains("스코프"))
-    }
-
     func testReadyScreenPointsAtBothWaysIn() {
         let steps = SetupCopy.readySteps.joined()
         XCTAssertTrue(steps.contains("메뉴 막대"))
@@ -109,18 +93,17 @@ final class SetupCopyTests: XCTestCase {
     func testDetailsCarriesTheTechnicalFacts() {
         let rows = SetupCopy.details(
             version: "0.1.0", path: "/Applications/trolley.app/Contents/MacOS/trolley",
-            model: "diffusiongemma-26B", address: "https://example.ts.net:8443", registered: true
+            model: "diffusiongemma-26B", address: "https://example.ts.net:8443"
         )
-        XCTAssertEqual(rows.map(\.label), ["버전", "프로그램 경로", "모델", "서버 주소", "MCP 등록"])
-        XCTAssertEqual(rows.last?.value, "등록됨 (user 스코프)")
+        XCTAssertEqual(rows.map(\.label), ["버전", "프로그램 경로", "모델", "서버 주소"])
+        XCTAssertEqual(rows.last?.value, "https://example.ts.net:8443")
     }
 
     func testDetailsSaysCheckingRatherThanGuessingWhenUnknown() {
         let rows = SetupCopy.details(
-            version: "0.1.0", path: "/x", model: nil, address: "https://x", registered: nil
+            version: "0.1.0", path: "/x", model: nil, address: "https://x"
         )
         XCTAssertEqual(rows.first(where: { $0.label == "모델" })?.value, "확인 중…")
-        XCTAssertEqual(rows.first(where: { $0.label == "MCP 등록" })?.value, "확인 중…")
     }
 
     func testDiagnosticsIsOneLinePerFact() {

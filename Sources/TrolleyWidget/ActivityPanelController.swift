@@ -2,38 +2,6 @@ import AppKit
 import TrolleyKit
 import TrolleyMCP
 
-/// Where ⏎ in the prompt box sends what was typed.
-///
-/// Two destinations because they answer different questions. The local model is
-/// there right now and replies in the panel; the agent queue only pays off while
-/// an MCP client is actually attached and calling `take_prompt`. Defaulting to
-/// the model is what makes the box useful with nothing else running.
-public enum PromptDestination: String, CaseIterable {
-    case localLLM
-    case agent
-
-    var title: String {
-        switch self {
-        case .localLLM: return "로컬 LLM"
-        case .agent: return "에이전트"
-        }
-    }
-
-    var hint: String {
-        switch self {
-        case .localLLM: return "엔터를 누르면 답이 여기에 나옵니다"
-        case .agent: return "⏎ 로 대기열에 넣으면 에이전트가 take_prompt로 가져갑니다"
-        }
-    }
-
-    static var stored: PromptDestination {
-        get {
-            let raw = UserDefaults.standard.string(forKey: LocalLLMSettings.destinationKey) ?? ""
-            return PromptDestination(rawValue: raw) ?? .localLLM
-        }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: LocalLLMSettings.destinationKey) }
-    }
-}
 
 /// What the wiki is contributing to the next question, flattened for the hint line.
 ///
@@ -68,16 +36,7 @@ struct ActivityPanelModel {
     let uptime: TimeInterval
     let axGranted: Bool
     let screenRecordingGranted: Bool
-    let pendingPrompts: [PromptQueue.Prompt]
-    let destination: PromptDestination
     let llm: LocalLLMSnapshot
-    /// Whether anything can actually call `take_prompt`. False in the app, whose
-    /// widget outlives every server: a server started while the app is up goes
-    /// headless and does not advertise the tool at all. Without this the agent
-    /// destination would queue into a box nobody opens.
-    let agentReaderAvailable: Bool
-    /// Only ever set for the local-model destination; the agent queue does not carry a
-    /// preamble.
     let wiki: WikiBadge?
 }
 
@@ -163,8 +122,6 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
     /// The user committed a prompt. The widget controller owns both the queue
     /// and the model session, and decides which one gets it.
     var onSubmitPrompt: ((String) -> Void)?
-    /// The destination switch moved.
-    var onChangeDestination: ((PromptDestination) -> Void)?
     /// "중지" while the model is generating.
     var onCancelGeneration: (() -> Void)?
     /// ＋ beside the box: drop the thread and start clean.
@@ -187,7 +144,9 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
     // only its text is updated. Rebuilding would throw away both the prompt the
     // user is halfway through typing and the field's first-responder status.
     private let uptimeLabel = ActivityPanelController.makeLabel(Style.mono, .secondaryLabelColor)
-    private let statsLabel = ActivityPanelController.makeLabel(Style.body, .secondaryLabelColor)
+    /// The session counters, and the control that opens the call list under
+    /// them. A plain label until it had somewhere to lead.
+    private let callsToggle = PanelButton()
     // Dot and name are separate labels rather than one attributed string: a
     // dynamic color inside an attributed string is resolved when the string is
     // built, which on the panel's HUD material came out almost invisible. A
@@ -198,8 +157,18 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
     private let screenLabel = ActivityPanelController.makeLabel(Style.body, .secondaryLabelColor)
     private let callsStack = NSStackView()
     private let emptyLabel = ActivityPanelController.makeLabel(Style.body, .tertiaryLabelColor)
-    private let pendingCountLabel = ActivityPanelController.makeLabel(Style.caption, .secondaryLabelColor)
-    private let pendingStack = NSStackView()
+    /// Belongs to the list, not to the panel: with the list closed there is
+    /// nothing on the far side of it to separate.
+    private let callsSeparator = ActivityPanelController.makeSeparator()
+    /// Closed on open, and on every open after it. The panel is opened to ask
+    /// something far more often than to read the log.
+    private var isCallsOpen = false
+    /// Whether the closed list has anything in it -- which of the two lines the
+    /// list section shows when it does open.
+    private var hasCalls = false
+    /// The header's own text, held so the toggle can recompose its title
+    /// without waiting for the next refresh.
+    private var statsText = ""
     private let promptField = PromptTextField()
     private let newConversationButton = PanelButton()
     private let transcriptButton = PanelButton()
@@ -207,7 +176,6 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
     /// Closed until asked for. Kept here rather than read off `isHidden` so a refresh
     /// that runs while the fetch is in flight does not collapse it.
     private var isTranscriptOpen = false
-    private let destinationControl = NSSegmentedControl()
     private let hintLabel = ActivityPanelController.makeLabel(Style.caption, .tertiaryLabelColor)
     private let answerSeparator = ActivityPanelController.makeSeparator()
     private let askedLabel = ActivityPanelController.makeLabel(Style.caption, .secondaryLabelColor)
@@ -411,7 +379,8 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         leading.spacing = 6
 
         stack.addArrangedSubview(headerRow(leading, uptimeLabel, alignment: .centerY))
-        stack.addArrangedSubview(statsLabel)
+        buildCallsToggle()
+        stack.addArrangedSubview(callsToggle)
 
         axLabel.stringValue = "AX"
         screenLabel.stringValue = "화면 기록"
@@ -423,7 +392,7 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         permissions.spacing = 14
         stack.addArrangedSubview(permissions)
 
-        stack.addArrangedSubview(Self.makeSeparator())
+        stack.addArrangedSubview(callsSeparator)
 
         callsStack.orientation = .vertical
         callsStack.alignment = .leading
@@ -431,33 +400,13 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         stack.addArrangedSubview(callsStack)
         emptyLabel.stringValue = "아직 툴 호출이 없습니다"
         stack.addArrangedSubview(emptyLabel)
+        applyCallsVisibility()
 
         stack.addArrangedSubview(Self.makeSeparator())
 
         let promptTitle = Self.makeLabel(Style.body, .labelColor)
         promptTitle.stringValue = "프롬프트"
-        stack.addArrangedSubview(headerRow(promptTitle, pendingCountLabel))
-
-        destinationControl.segmentCount = PromptDestination.allCases.count
-        destinationControl.segmentStyle = .rounded
-        destinationControl.controlSize = .small
-        destinationControl.trackingMode = .selectOne
-        for (index, destination) in PromptDestination.allCases.enumerated() {
-            destinationControl.setLabel(destination.title, forSegment: index)
-            destinationControl.setWidth(Self.contentWidth / 2, forSegment: index)
-        }
-        // Hidden until a model says otherwise. `NSStackView` detaches hidden
-        // arranged subviews, so this costs no height in the app -- and starting
-        // hidden means the switch never flashes on during the first refresh.
-        destinationControl.isHidden = true
-        destinationControl.target = self
-        destinationControl.action = #selector(destinationChanged)
-        stack.addArrangedSubview(destinationControl)
-
-        pendingStack.orientation = .vertical
-        pendingStack.alignment = .leading
-        pendingStack.spacing = 2
-        stack.addArrangedSubview(pendingStack)
+        stack.addArrangedSubview(promptTitle)
 
         promptField.font = Style.body
         promptField.bezelStyle = .roundedBezel
@@ -599,6 +548,62 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         stack.addArrangedSubview(transcriptStack)
     }
 
+    /// The counters double as the call list's disclosure control.
+    ///
+    /// The log is the tallest thing in the panel and the least often wanted: the
+    /// panel is opened to ask a question, and eight rows of `press_key ✓ 414 ms`
+    /// push the prompt box down past where the eye lands. Closed, one line still
+    /// says how many calls ran and how many failed -- the part of the log most
+    /// opens actually needed.
+    private func buildCallsToggle() {
+        callsToggle.isBordered = false
+        callsToggle.bezelStyle = .inline
+        callsToggle.font = Style.body
+        // Chevron after the counters, where a disclosure triangle sits in a list.
+        callsToggle.imagePosition = .imageTrailing
+        callsToggle.contentTintColor = .secondaryLabelColor
+        callsToggle.target = self
+        callsToggle.action = #selector(toggleCalls)
+        callsToggle.setContentHuggingPriority(.required, for: .horizontal)
+    }
+
+    @objc private func toggleCalls() {
+        // Deferred for the reason spelled out at length in `toggleTranscript`: a
+        // click that arrives through the accessibility API -- and trolley's own
+        // `click` tool is exactly that -- is delivered while the accessibility
+        // thread holds the view hierarchy lock. Laying the rows out from inside
+        // that window deadlocks the app silently.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.isCallsOpen.toggle()
+            self.applyCallsVisibility()
+            self.resizeToFit()
+        }
+    }
+
+    /// One place decides what the list section shows, because three things have a
+    /// say in it: the toggle, whether any call has run yet, and `replaceRows`,
+    /// which hides an empty stack on its own.
+    private func applyCallsVisibility() {
+        callsSeparator.isHidden = !isCallsOpen
+        callsStack.isHidden = !isCallsOpen || !hasCalls
+        emptyLabel.isHidden = !isCallsOpen || hasCalls
+
+        // The label says what pressing it will do next, as the transcript's does.
+        let title = isCallsOpen ? "툴 호출 접기" : "툴 호출 펼치기"
+        let chevron = NSImage(
+            systemSymbolName: isCallsOpen ? "chevron.up" : "chevron.down",
+            accessibilityDescription: title
+        )
+        callsToggle.image = chevron
+        // Without the symbol the button would be counters and nothing else, with
+        // no sign it can be pressed.
+        callsToggle.title = chevron == nil
+            ? statsText + (isCallsOpen ? " ▴" : " ▾")
+            : statsText
+        callsToggle.toolTip = title
+    }
+
     @objc private func newConversationClicked() {
         // Deferred for the same reason as `toggleTranscript` -- see there. This one has
         // survived on luck: it only tears rows down, and an empty transcript lays nothing
@@ -733,14 +738,16 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
 
     private func update(_ model: ActivityPanelModel) {
         uptimeLabel.stringValue = "up " + PanelFormat.uptime(model.uptime)
-        statsLabel.stringValue = PanelFormat.stats(
+        statsText = PanelFormat.stats(
             calls: model.log.totalCalls, errors: model.log.errorCount
         )
         axDot.textColor = model.axGranted ? .systemGreen : .systemRed
         screenDot.textColor = model.screenRecordingGranted ? .systemGreen : .systemRed
 
         replaceRows(of: callsStack, with: model.log.entries.prefix(Self.maxRows).map(callRow))
-        emptyLabel.isHidden = !model.log.entries.isEmpty
+        hasCalls = !model.log.entries.isEmpty
+        // After `replaceRows`, which has its own opinion about an empty stack.
+        applyCallsVisibility()
 
         updatePromptSection(model)
 
@@ -766,22 +773,10 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
     /// of information that only ever applies to the half in use.
     private func updatePromptSection(_ model: ActivityPanelModel) {
         let section = PromptSectionState(model: model)
-        destinationControl.isHidden = !section.showsDestinationControl
-        destinationControl.selectedSegment = section.selectedSegment
         hintLabel.stringValue = section.hint
         hintLabel.textColor = section.hintIsWarning ? .systemOrange : .tertiaryLabelColor
         hintLabel.maximumNumberOfLines = 2
         promptField.placeholderString = section.placeholder
-
-        let agentMode = section.destination == .agent
-        let pending = model.pendingPrompts
-
-        pendingCountLabel.isHidden = !agentMode
-        pendingCountLabel.stringValue = pending.isEmpty ? "대기 없음" : "대기 \(pending.count)건"
-        replaceRows(
-            of: pendingStack,
-            with: agentMode ? pending.prefix(Self.maxPendingRows).map(pendingRow) : []
-        )
 
         let llm = model.llm
         let showAnswer = section.showsAnswerBlock
@@ -863,13 +858,6 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         return row
     }
 
-    private func pendingRow(_ prompt: PromptQueue.Prompt) -> NSView {
-        let label = Self.makeLabel(Style.caption, .secondaryLabelColor)
-        // Newlines would make one prompt eat several rows' worth of height.
-        label.stringValue = "• " + prompt.text.replacingOccurrences(of: "\n", with: " ")
-        label.widthAnchor.constraint(equalToConstant: Self.contentWidth).isActive = true
-        return label
-    }
 
     private static func makeLabel(_ font: NSFont, _ color: NSColor) -> NSTextField {
         let label = NSTextField(labelWithString: "")
@@ -891,11 +879,6 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         onSubmitPrompt?(text)
     }
 
-    @objc private func destinationChanged() {
-        let index = destinationControl.selectedSegment
-        guard PromptDestination.allCases.indices.contains(index) else { return }
-        onChangeDestination?(PromptDestination.allCases[index])
-    }
 
     @objc private func cancelGeneration() {
         onCancelGeneration?()
@@ -934,27 +917,21 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
 /// The panel's number formatting, kept free of AppKit so the awkward cases
 /// (an hour of uptime, a sub-millisecond call) are testable.
 enum PanelFormat {
-    /// The hint under the prompt box.
-    ///
-    /// Pure so the combinations are testable: the orphan-queue warning has to win over
-    /// everything, the agent destination never mentions the wiki because its prompts do
-    /// not carry one, and "already sent" has to read as normal rather than as a fault.
-    static func promptHint(
-        destination: PromptDestination, wiki: WikiBadge?, orphanQueue: Bool
-    ) -> String {
-        if orphanQueue {
-            return "가져갈 서버가 없습니다 — trolley.app 을 끄고 trolley mcp 로 띄워야 take_prompt 가 열립니다"
-        }
-        guard destination == .localLLM, let wiki else { return destination.hint }
+    /// The hint under the prompt box. Pure so the combinations stay testable, and
+    /// "already sent" has to read as normal rather than as a fault.
+    static let plainHint = "엔터를 누르면 답이 여기에 나옵니다"
+
+    static func promptHint(wiki: WikiBadge?) -> String {
+        guard let wiki else { return plainHint }
         if wiki.capped {
-            return destination.hint + " · 위키가 바뀌었습니다 (새 대화부터 반영)"
+            return plainHint + " · 위키가 바뀌었습니다 (새 대화부터 반영)"
         }
         if wiki.attaching {
-            return destination.hint + (wiki.isRefresh
+            return plainHint + (wiki.isRefresh
                 ? " · 위키 \(wiki.matched)건 다시 첨부"
                 : " · 위키 \(wiki.matched)건 첨부")
         }
-        return destination.hint + " · 위키 \(wiki.matched)건 (이미 전달됨)"
+        return plainHint + " · 위키 \(wiki.matched)건 (이미 전달됨)"
     }
 
     static func uptime(_ interval: TimeInterval) -> String {

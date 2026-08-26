@@ -19,8 +19,6 @@ public enum LocalLLMSettings {
     public static let baseURLKey = "trolley.localLLM.baseURL"
     public static let tokenKey = "trolley.localLLM.token"
     public static let conversationKey = "trolley.localLLM.conversationID"
-    /// Which way ⏎ sends: the model, or the `take_prompt` queue.
-    public static let destinationKey = "trolley.localLLM.destination"
 
     private static var defaults: UserDefaults { .standard }
 

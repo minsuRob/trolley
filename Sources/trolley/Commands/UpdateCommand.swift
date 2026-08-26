@@ -56,6 +56,6 @@ struct UpdateCommand: ParsableCommand {
         print("업데이트 완료: \(current) → \(installed)")
         // The swap gave the path a new inode; anything already running keeps the
         // old one until it is restarted.
-        print("실행 중인 trolley mcp는 재시작해야 새 버전으로 바뀝니다.")
+        print("실행 중인 trolley 앱은 다시 열어야 새 버전으로 바뀝니다.")
     }
 }
