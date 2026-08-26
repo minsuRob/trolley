@@ -187,7 +187,9 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
     // only its text is updated. Rebuilding would throw away both the prompt the
     // user is halfway through typing and the field's first-responder status.
     private let uptimeLabel = ActivityPanelController.makeLabel(Style.mono, .secondaryLabelColor)
-    private let statsLabel = ActivityPanelController.makeLabel(Style.body, .secondaryLabelColor)
+    /// The session counters, and the control that opens the call list under
+    /// them. A plain label until it had somewhere to lead.
+    private let callsToggle = PanelButton()
     // Dot and name are separate labels rather than one attributed string: a
     // dynamic color inside an attributed string is resolved when the string is
     // built, which on the panel's HUD material came out almost invisible. A
@@ -198,6 +200,18 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
     private let screenLabel = ActivityPanelController.makeLabel(Style.body, .secondaryLabelColor)
     private let callsStack = NSStackView()
     private let emptyLabel = ActivityPanelController.makeLabel(Style.body, .tertiaryLabelColor)
+    /// Belongs to the list, not to the panel: with the list closed there is
+    /// nothing on the far side of it to separate.
+    private let callsSeparator = ActivityPanelController.makeSeparator()
+    /// Closed on open, and on every open after it. The panel is opened to ask
+    /// something far more often than to read the log.
+    private var isCallsOpen = false
+    /// Whether the closed list has anything in it -- which of the two lines the
+    /// list section shows when it does open.
+    private var hasCalls = false
+    /// The header's own text, held so the toggle can recompose its title
+    /// without waiting for the next refresh.
+    private var statsText = ""
     private let pendingCountLabel = ActivityPanelController.makeLabel(Style.caption, .secondaryLabelColor)
     private let pendingStack = NSStackView()
     private let promptField = PromptTextField()
@@ -411,7 +425,8 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         leading.spacing = 6
 
         stack.addArrangedSubview(headerRow(leading, uptimeLabel, alignment: .centerY))
-        stack.addArrangedSubview(statsLabel)
+        buildCallsToggle()
+        stack.addArrangedSubview(callsToggle)
 
         axLabel.stringValue = "AX"
         screenLabel.stringValue = "화면 기록"
@@ -423,7 +438,7 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         permissions.spacing = 14
         stack.addArrangedSubview(permissions)
 
-        stack.addArrangedSubview(Self.makeSeparator())
+        stack.addArrangedSubview(callsSeparator)
 
         callsStack.orientation = .vertical
         callsStack.alignment = .leading
@@ -431,6 +446,7 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         stack.addArrangedSubview(callsStack)
         emptyLabel.stringValue = "아직 툴 호출이 없습니다"
         stack.addArrangedSubview(emptyLabel)
+        applyCallsVisibility()
 
         stack.addArrangedSubview(Self.makeSeparator())
 
@@ -599,6 +615,62 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         stack.addArrangedSubview(transcriptStack)
     }
 
+    /// The counters double as the call list's disclosure control.
+    ///
+    /// The log is the tallest thing in the panel and the least often wanted: the
+    /// panel is opened to ask a question, and eight rows of `press_key ✓ 414 ms`
+    /// push the prompt box down past where the eye lands. Closed, one line still
+    /// says how many calls ran and how many failed -- the part of the log most
+    /// opens actually needed.
+    private func buildCallsToggle() {
+        callsToggle.isBordered = false
+        callsToggle.bezelStyle = .inline
+        callsToggle.font = Style.body
+        // Chevron after the counters, where a disclosure triangle sits in a list.
+        callsToggle.imagePosition = .imageTrailing
+        callsToggle.contentTintColor = .secondaryLabelColor
+        callsToggle.target = self
+        callsToggle.action = #selector(toggleCalls)
+        callsToggle.setContentHuggingPriority(.required, for: .horizontal)
+    }
+
+    @objc private func toggleCalls() {
+        // Deferred for the reason spelled out at length in `toggleTranscript`: a
+        // click that arrives through the accessibility API -- and trolley's own
+        // `click` tool is exactly that -- is delivered while the accessibility
+        // thread holds the view hierarchy lock. Laying the rows out from inside
+        // that window deadlocks the app silently.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.isCallsOpen.toggle()
+            self.applyCallsVisibility()
+            self.resizeToFit()
+        }
+    }
+
+    /// One place decides what the list section shows, because three things have a
+    /// say in it: the toggle, whether any call has run yet, and `replaceRows`,
+    /// which hides an empty stack on its own.
+    private func applyCallsVisibility() {
+        callsSeparator.isHidden = !isCallsOpen
+        callsStack.isHidden = !isCallsOpen || !hasCalls
+        emptyLabel.isHidden = !isCallsOpen || hasCalls
+
+        // The label says what pressing it will do next, as the transcript's does.
+        let title = isCallsOpen ? "툴 호출 접기" : "툴 호출 펼치기"
+        let chevron = NSImage(
+            systemSymbolName: isCallsOpen ? "chevron.up" : "chevron.down",
+            accessibilityDescription: title
+        )
+        callsToggle.image = chevron
+        // Without the symbol the button would be counters and nothing else, with
+        // no sign it can be pressed.
+        callsToggle.title = chevron == nil
+            ? statsText + (isCallsOpen ? " ▴" : " ▾")
+            : statsText
+        callsToggle.toolTip = title
+    }
+
     @objc private func newConversationClicked() {
         // Deferred for the same reason as `toggleTranscript` -- see there. This one has
         // survived on luck: it only tears rows down, and an empty transcript lays nothing
@@ -733,14 +805,16 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
 
     private func update(_ model: ActivityPanelModel) {
         uptimeLabel.stringValue = "up " + PanelFormat.uptime(model.uptime)
-        statsLabel.stringValue = PanelFormat.stats(
+        statsText = PanelFormat.stats(
             calls: model.log.totalCalls, errors: model.log.errorCount
         )
         axDot.textColor = model.axGranted ? .systemGreen : .systemRed
         screenDot.textColor = model.screenRecordingGranted ? .systemGreen : .systemRed
 
         replaceRows(of: callsStack, with: model.log.entries.prefix(Self.maxRows).map(callRow))
-        emptyLabel.isHidden = !model.log.entries.isEmpty
+        hasCalls = !model.log.entries.isEmpty
+        // After `replaceRows`, which has its own opinion about an empty stack.
+        applyCallsVisibility()
 
         updatePromptSection(model)
 
