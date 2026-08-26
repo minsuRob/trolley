@@ -8,17 +8,22 @@
 ## 가장 먼저 — 격리 규칙
 
 **당신은 `/Users/markhub/workspace/llm-trolley/trolley-autoupdate` 에서만 작업한다.**
-`feat/auto-update` 브랜치의 전용 git worktree다.
+지금 이 워크트리는 `develop` 브랜치에 있다. `develop` 이 기본 브랜치다 — `main` 은
+없앴고, `feat/auto-update` 와 `feat/mcp-server-and-text-entry` 는 둘 다 `develop` 에
+병합돼 있다.
 
-- `/Users/markhub/workspace/llm-trolley/trolley` 은 **건드리지 마라.** 다른 세션이 거기서
-  작업 중이다.
-- `git reset --hard`, `git checkout <branch>`, `git clean` 을 쓰지 마라. 직전에 정확히 이
-  조합으로 옆 세션의 미커밋 작업을 날린 사고가 있었다. 격리돼 있다고 *믿고* 실행한 것이
-  원인이었다. 의심되면 `git worktree list` 로 확인하고, 그래도 애매하면 사람에게 물어라.
+- `/Users/markhub/workspace/llm-trolley/trolley` 은 **건드리지 마라.** 옆 세션의 작업은
+  끝나서 병합됐지만(`8f325f7`), 그 워크트리는 여전히 그쪽 것이다.
+- `git reset --hard`, `git clean` 을 쓰지 마라. 직전에 정확히 이 조합으로 옆 세션의
+  미커밋 작업을 날린 사고가 있었다. 격리돼 있다고 *믿고* 실행한 것이 원인이었다.
+  의심되면 `git worktree list` 로 확인하고, 그래도 애매하면 사람에게 물어라.
 - `/Users/markhub/Desktop/workspace/MAKi` 는 **읽기 전용.** `.gitignore` 포함 무엇도 쓰지 마라.
-- `/Applications` 에 설치하지 마라. `Scripts/build-installer.sh` 를 실행하지 마라 (서명·공증이
-  걸려 있고 사용자 키체인을 건드린다).
-- 푸시하지 마라.
+- `/Applications` 에 설치하지 마라.
+- `Scripts/build-installer.sh` 는 **사람의 허락을 받고만** 돌려라. 전역 키체인 검색 목록과
+  기본 키체인을 바꾼다 — `signing-keychain.sh` 주석에 그것 때문에 죽은 키체인 ~70개가
+  쌓이고 기본 키체인이 삭제된 워크트리를 가리키게 된 사고가 적혀 있다. 로컬 검증만
+  필요하면 `--skip-notarize` 로 충분하다 (`verifySignature` 는 팀 핀만 본다).
+- 푸시는 사람이 시킬 때만 한다.
 
 ## 배경
 
@@ -127,7 +132,7 @@ $ curl -sIL https://maki.ink/updates/trolley/mac/latest/manifest.json
 
 **5. 앱은 자식 프로세스를 갖지 않는다.** 확인됨 — 교체 후 깔끔한 재실행으로 충분하다.
 
-**6. 지금 테스트는 정확히 451개다** (`grep -rho '^\s*func test[A-Za-z0-9_]*' Tests | wc -l`).
+**6. 지금 테스트는 정확히 405개다** (`grep -rho '^\s*func test[A-Za-z0-9_]*' Tests | wc -l`).
 이건 하한이 아니라 오늘의 값이다. 아래 A1 을 보라.
 
 **7. `dist/` 는 지금 없다.** 배포할 zip 자체가 아직 존재하지 않는다.
@@ -154,7 +159,7 @@ electron-updater 의 `latest-mac.yml` 은 Swift 에 안 맞는다. 자체 JSON:
 `version`/`asset`/`sha256` 은 겹치는 필드가 하나도 없다. `GitHubRelease` 를 지우고
 `ReleaseManifest` 를 새로 써라. `Tests/TrolleyKitTests/SelfUpdateTests.swift:33` 의
 `GitHubReleaseTests`(테스트 3개)도 같이 지운다 — GitHub 을 안 쓰는데 남길 이유가 없다.
-**그래서 451 이 448 로 줄어든다. 그건 정상이다.** 요구는 "451 유지"가 아니라
+**그래서 405 가 402 로 줄어든다. 그건 정상이다.** 요구는 "405 유지"가 아니라
 "새 테스트로 순증할 것"이다.
 
 **A2 — 파서는 주입 시임이 아니다.** `UpdateInstaller.swift:36` 이
@@ -256,10 +261,14 @@ convention rather than `@MainActor`" 라고 못박고 있고 위젯 컨트롤러
 `UpdateStatus`(`.upToDate / .checking / .available(version) / .downloaded(version) / .failed(String)`)
 를 `TrolleyKit` 에 두고 `WelcomeFlow.run()` 에서만 배선하라.
 
-**`Sources/TrolleyWidget/StatusWidgetController.swift` 와 `ActivityPanelController.swift` 는
-수정하지 마라.** 옆 세션이 지금 그 둘을 크게 뜯고 있다 (`PromptQueue`, `PromptDestination`,
-목적지 세그먼트 컨트롤, `pendingPrompts`, `agentReaderAvailable` 제거). 오늘 거기 쓰는 것은
-전부 충돌한다. 그쪽에 버튼을 만들지 마라 — 그쪽이 만든다.
+**이 금지는 풀렸다.** 이전 판은 옆 세션이 `StatusWidgetController.swift` 와
+`ActivityPanelController.swift` 를 크게 뜯는 중이라 손대지 말라고 적었다. 그 작업은
+`8f325f7`("MCP 를 걷어내고 도구만 남긴다")로 끝나 `develop` 에 병합됐다 — `PromptQueue`
+는 아예 삭제됐고 두 파일은 지금 안정 상태다. 충돌 걱정으로 피할 이유는 사라졌다.
+
+그래도 **설치 트리거는 여전히 `MenuBarController` 다.** 이유가 바뀌었을 뿐이다:
+메뉴 막대는 백그라운드 앱을 찾을 때 사람이 보는 자리이고, `MenuBarMenu.specs` 가
+데이터라 윈도우 서버 없이 테스트된다. 위젯 쪽은 필요하면 상태 표시에 써도 된다.
 
 **A5 — 그런데 그러면 설치를 누를 곳이 없다.** 정책은 "사용자가 누를 때"인데 위 금지를 다
 지키면 앱 안에 누를 자리가 남지 않는다. 이전 판의 구멍이다.
@@ -343,7 +352,7 @@ SPA 셸이다 — 위 B2 를 보라.
 - 순수 함수에는 전부 XCTest 를 붙인다. 네트워크·윈도우 서버·맥 상태 없이 돌아야 한다.
   `Tests/TrolleyKitTests/SelfUpdateTests.swift` 스타일을 따라 확장하라.
 - 사용자에게 보이는 문자열과 커밋 메시지는 한국어. 주석과 식별자는 영어.
-- `swift build` 는 green 이어야 한다. `swift test` 는 **451 이 아니라 448 에서 시작해**
+- `swift build` 는 green 이어야 한다. `swift test` 는 **405 가 아니라 402 에서 시작해**
   순증해야 한다 (A1). 줄어든 3개 말고 다른 게 빨개지면 그건 회귀다.
 
 ## 끝나면
