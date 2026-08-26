@@ -158,6 +158,46 @@ $ curl -sIL https://maki.ink/updates/trolley/mac/latest/manifest.json
 가 만들어져 있다. **공증은 없다** — 서명은 팀 `46LU76SNUA` 로 되어 있어 `verifySignature`
 는 통과하지만 다른 맥에서는 Gatekeeper 가 막는다. 실배포용으로 쓰지 마라.
 
+**8. 릴리스는 공증됐지만 스테이플되지 않았다. 측정으로 확인했고, 원인은 아직 모른다.**
+
+`v0.2.0` 을 공증 포함으로 다시 빌드해 릴리스 자산을 교체했다. Apple 판정은 zip·dmg 둘 다
+`status: Accepted` 다. 설치도 문제없다:
+
+| 확인 | 결과 |
+|---|---|
+| 0.1.0 → 0.2.0 설치 | 성공, 종료코드 0 |
+| 설치된 실행파일 | 공증본과 **바이트 동일** (`c4a9cd67…`) |
+| 팀 핀 `codesign -R` | 통과 |
+| 실행 | `check-permissions` 정상 응답 |
+| 멱등성 / 찌꺼기 | "최신입니다" 0 / 임시 파일 0개 |
+
+**그런데 `spctl` 은 `rejected  source=Unnotarized Developer ID` 라고 한다.**
+
+`build-installer.sh` 의 `staple_by_hand` 주석은 이 실패가 *이 기계의 문제*라고 적어 두었다
+— "우리 번들과 이미 공증된 서드파티 앱 모두에서 stapler 가 실패한다" 는 근거로.
+**그 근거는 틀렸다.** 재 봤다:
+
+```
+Docker.app   stapler validate → exit 0      spctl → accepted, Notarized Developer ID
+Itsycal.app  stapler validate → exit 0      spctl → accepted, Notarized Developer ID
+Fork.app     stapler validate → exit 0
+trolley.app  stapler validate → exit 65
+```
+
+이 기계의 stapler 는 멀쩡하다. 우리 번들만 안 된다. 더 좁힌 것들:
+
+- 티켓 **위치는 맞다**. Itsycal 도 같은 `Contents/CodeResources` 에 `s8ch` 티켓을 둔다
+- 티켓 **내용도 번들과 맞다**. 티켓 안 cdhash `9d25128afb…` = 번들 arm64 cdhash
+- 손으로 넣어서 그런 것도 **아니다**. 수동 티켓을 지우고 진짜 `xcrun stapler staple` 을
+  돌려도 티켓은 잘 받아오고 `Could not validate ticket` 로 똑같이 Error 65 다
+- 유니버설(x86_64 + arm64)이고 슬라이스마다 cdhash 가 다르다
+  (`9d25128afb…` / `2548504004…`). 티켓 props 에는 하나만 보였다. **의심은 가지만
+  Itsycal 도 유니버설인데 통과하므로 이것만으로는 설명이 안 된다.**
+
+**자동 업데이트에는 영향이 없다.** `verifySignature` 는 팀 핀만 보고 그건 통과한다.
+영향받는 것은 **처음 설치**다 — dmg 를 받아 여는 사람은 Gatekeeper 온라인 조회에 기대게
+되고, 오프라인이면 막힌다. 이 브리프의 범위 밖이지만 배포 전에 누군가 풀어야 한다.
+
 ---
 
 ## 만들 것
