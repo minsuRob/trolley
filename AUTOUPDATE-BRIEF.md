@@ -69,6 +69,23 @@ trolley 는 SwiftPM 으로 만든 macOS 메뉴 막대 앱이다. 로컬 LLM(Diff
 → **HTTP 404**. 저장소는 공개(200)인데 릴리스도 태그도 0개고(`git tag` → 0줄),
 `build-installer.sh` 에 업로드 단계가 없다. `trolley update` 는 한 번도 성공한 적이 없다.
 
+직접 돌려 본 결과다. 세 번 연달아, 매번 같다:
+
+```
+$ swift build && ./.build/debug/trolley update --check
+설치 위치: .../.build/arm64-apple-macosx/debug/trolley
+현재 버전: 0.1.0
+Error: 공개된 릴리스가 아직 없습니다.
+$ echo $?
+1
+```
+
+**여기서 만들 것 6 의 근거가 나온다.** "릴리스 없음" 이 지금은 `Error:` 에 종료코드 1 로
+나온다 — 요구하는 "차분한 정상 상태"의 정반대다. 고친 뒤 이 명령이 종료코드 0 으로
+차분하게 끝나는지가 그대로 확인 방법이 된다.
+
+(레이아웃 판별은 잘 돈다: `.build/.../debug/trolley` 를 `bareBinary` 로 맞게 집었다.)
+
 **2. 배포 위치는 MAKi 인프라를 재사용한다.** 같은 사용자의 다른 제품이 이미 라이브 피드를
 돌린다. 규약 참고용으로 읽어라 (읽기만):
 
@@ -267,6 +284,10 @@ convention rather than `@MainActor`" 라고 못박고 있고 위젯 컨트롤러
 첫 배포 전에는 이게 정상이고 UI 에 보인다. `.noRelease` 는 `.failed` 가 아니라
 `.upToDate` 쪽으로 가야 한다. 실제로 그 상태에 도달하는 경로는 404 가 아니라
 SPA 셸이다 — 위 B2 를 보라.
+
+**지금은 반대로 돼 있다.** 사실 1 에 붙여 둔 측정대로 `trolley update --check` 가
+`Error:` 를 찍고 종료코드 1 로 죽는다. CLI 와 `UpdateStatus` 양쪽 다 고쳐야 한다.
+고친 뒤 그 명령이 종료코드 0 으로 차분히 끝나면 이 항목은 끝난 것이다.
 
 ### 7. 재실행
 
