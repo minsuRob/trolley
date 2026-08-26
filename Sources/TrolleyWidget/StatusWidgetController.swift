@@ -403,7 +403,9 @@ public final class StatusWidgetController {
                 prompt: localLLM.prompt,
                 // The denoising preview stands in until the first real token, so
                 // the box is never blank while the model is visibly working.
-                body: localLLM.answer.isEmpty ? localLLM.draft : localLLM.answer,
+                // `visibleAnswer`, never `answer`: mid-loop the latter is the tool-call
+                // JSON, and this is the one surface that belongs to the person asking.
+                body: localLLM.visibleAnswer.isEmpty ? localLLM.draft : localLLM.visibleAnswer,
                 status: LocalLLMSession.statusLine(for: localLLM.phase, backend: localLLM.backend),
                 isBusy: localLLM.isBusy
             ),

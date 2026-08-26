@@ -9,11 +9,26 @@ final class TranscriptRenderingTests: XCTestCase {
         TranscriptRendering.line(from: .init(role: role, content: content))
     }
 
+    /// Built with `resultMessage`, not by hand. The first version of this test wrote the
+    /// separator itself -- a space -- while the real format puts the payload on the next
+    /// line, so the test passed against a shape that never occurs and the panel printed
+    /// the whole tree.
     func testToolResultCollapsesToItsName() {
-        let huge = "[도구 결과] snapshot {\"nodeCount\":210,\"tree\":[" + String(repeating: "x", count: 4000) + "]}"
+        let huge = ToolCallContract.resultMessage(
+            tool: "snapshot",
+            result: "{\"nodeCount\":210,\"tree\":[" + String(repeating: "x", count: 4000) + "]}"
+        )
         let rendered = line("user", huge)
         XCTAssertEqual(rendered?.kind, .tool)
         XCTAssertEqual(rendered?.text, "← snapshot")
+    }
+
+    /// Every tool goes through the same envelope, so one shape check covers them all.
+    func testEveryToolResultShapeCollapses() {
+        for tool in ["find_elements", "click", "launch_app", "press_key"] {
+            let message = ToolCallContract.resultMessage(tool: tool, result: #"{"ok":true}"#)
+            XCTAssertEqual(line("user", message)?.text, "← \(tool)")
+        }
     }
 
     func testToolCallShowsTheToolAndItsTarget() {

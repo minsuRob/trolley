@@ -156,9 +156,9 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
     /// Past this the answer scrolls. Chosen so the panel still fits above the
     /// widget in its default bottom-right corner.
     private static let maxAnswerHeight: CGFloat = 150
-    /// Taller than the answer block: the transcript is opened precisely when several
-    /// turns need to be compared at once.
-    private static let maxTranscriptHeight: CGFloat = 200
+    /// Enough turns to see where a thread went wrong without pushing the panel off the
+    /// screen; `새 대화` is the answer to a thread longer than this.
+    private static let maxTranscriptRows = 12
 
     /// The user committed a prompt. The widget controller owns both the queue
     /// and the model session, and decides which one gets it.
@@ -203,9 +203,7 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
     private let promptField = PromptTextField()
     private let newConversationButton = PanelButton()
     private let transcriptButton = PanelButton()
-    private let transcriptScroll = NSScrollView()
     private let transcriptStack = NSStackView()
-    private var transcriptHeight: NSLayoutConstraint!
     /// Closed until asked for. Kept here rather than read off `isHidden` so a refresh
     /// that runs while the fetch is in flight does not collapse it.
     private var isTranscriptOpen = false
@@ -584,46 +582,56 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
 
     /// The whole thread, collapsed to one line per message and closed by default.
     ///
-    /// Closed by default because the panel's job is the exchange in front of you; the
-    /// transcript is for the moment you suspect the model is answering a question you
-    /// asked five minutes ago, which is exactly when one line per message is enough to
-    /// see it.
+    /// A plain stack in the panel's own column, like `callsStack` and `pendingStack`
+    /// above it -- not a scroll view. Two attempts at scrolling this cost a day: first a
+    /// wrapper `NSView` that kept `translatesAutoresizingMaskIntoConstraints` and
+    /// collapsed to nothing, then an `NSScrollView` whose layout, the moment the
+    /// transcript became visible, killed the rest of `setTranscript` -- probed statement
+    /// by statement, with no crash, no hang and nothing in the unified log.
+    ///
+    /// The panel already knows how to be a list. Capping the rows is what scrolling was
+    /// for, and a cap is what the other two sections use.
     private func buildTranscriptBlock() {
         transcriptStack.orientation = .vertical
         transcriptStack.alignment = .leading
         transcriptStack.spacing = 3
-        transcriptStack.translatesAutoresizingMaskIntoConstraints = false
-
-        // The stack is the document view directly. Wrapping it in a plain `NSView` first
-        // is the obvious thing and it renders nothing: that view keeps
-        // `translatesAutoresizingMaskIntoConstraints`, so its own zero frame becomes a
-        // set of constraints that fight the ones pinning the stack inside it, and the
-        // whole block collapses. Measured -- the AX tree showed the scroll area present
-        // and every row missing.
-        transcriptStack.widthAnchor.constraint(equalToConstant: Self.contentWidth).isActive = true
-        transcriptScroll.documentView = transcriptStack
-        transcriptScroll.drawsBackground = false
-        transcriptScroll.borderType = .noBorder
-        transcriptScroll.hasVerticalScroller = true
-        transcriptScroll.autohidesScrollers = true
-        transcriptScroll.translatesAutoresizingMaskIntoConstraints = false
-        // Zero rather than hidden: an `NSStackView` detaches a hidden arranged subview,
-        // and re-attaching it on every toggle re-runs the whole panel's layout.
-        transcriptHeight = transcriptScroll.heightAnchor.constraint(equalToConstant: 0)
-        NSLayoutConstraint.activate([
-            transcriptScroll.widthAnchor.constraint(equalToConstant: Self.contentWidth),
-            transcriptHeight
-        ])
-        stack.addArrangedSubview(transcriptScroll)
+        transcriptStack.isHidden = true
+        stack.addArrangedSubview(transcriptStack)
     }
 
     @objc private func newConversationClicked() {
-        // Closed as well: what it is showing is the thread that was just abandoned.
-        setTranscript(open: false)
-        onNewConversation?()
+        // Deferred for the same reason as `toggleTranscript` -- see there. This one has
+        // survived on luck: it only tears rows down, and an empty transcript lays nothing
+        // out. It stops being luck the moment it is pressed with the transcript open.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            // Closed as well: what it is showing is the thread that was just abandoned.
+            self.setTranscript(open: false)
+            self.onNewConversation?()
+        }
     }
 
     @objc private func toggleTranscript() {
+        // Deferred to the next run loop turn, and that is not a style choice -- it is a
+        // deadlock fix, found by sampling a frozen app:
+        //
+        //   main thread:  -[NSTextField setFrameSize:] → -[NSViewHierarchyLock
+        //                 _lockForWriting:] → _pthread_cond_wait          (blocked)
+        //   HIE thread:   servicing the accessibility request that delivered this click
+        //
+        // A click that arrives through the accessibility API is dispatched while the
+        // accessibility server thread still holds the view hierarchy lock. Building rows
+        // here means laying out new `NSTextField`s inside that window, so the main thread
+        // asks for the write lock and waits for a thread that is waiting for it. The app
+        // does not crash and does not log; it simply stops redrawing, which is exactly
+        // what "the button does nothing" looked like from the outside for a day.
+        //
+        // `새 대화` escaped it by accident: with the transcript closed it has no text
+        // fields to lay out, so it never asks for the lock.
+        DispatchQueue.main.async { [weak self] in self?.performTranscriptToggle() }
+    }
+
+    private func performTranscriptToggle() {
         setTranscript(open: !isTranscriptOpen)
         guard isTranscriptOpen else { return }
         showTranscript(rows: [transcriptRow(.init(kind: .scaffolding, text: "불러오는 중…"))])
@@ -646,10 +654,9 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
 
     private func setTranscript(open: Bool) {
         isTranscriptOpen = open
-        transcriptHeight.constant = open ? Self.maxTranscriptHeight : 0
+        transcriptStack.isHidden = !open
         transcriptButton.contentTintColor = open ? .controlAccentColor : .secondaryLabelColor
-        // The label says what pressing it will do next, which is also the only state this
-        // button has that survives into the AX tree -- a panel's scroll views do not.
+        // The label says what pressing it will do next.
         let title = open ? "전체 대화 닫기" : "전체 대화 보기"
         transcriptButton.toolTip = title
         transcriptButton.setAccessibilityLabel(title)
@@ -657,18 +664,11 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         resizeToFit()
     }
 
+    /// Newest last, capped. The tail is the part someone opened this to read -- when a
+    /// thread has run long, the question that is bothering them is the recent one.
     private func showTranscript(rows: [NSView]) {
-        replaceRows(of: transcriptStack, with: rows)
+        replaceRows(of: transcriptStack, with: Array(rows.suffix(Self.maxTranscriptRows)))
         resizeToFit()
-        // Newest at the bottom, which is where the eye goes and where the question that
-        // is bothering you actually is.
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.transcriptScroll.documentView?.scroll(
-                NSPoint(x: 0, y: max(0, (self.transcriptScroll.documentView?.frame.height ?? 0)
-                    - self.transcriptScroll.contentSize.height))
-            )
-        }
     }
 
     private func transcriptRow(_ line: TranscriptRendering.Line) -> NSView {
@@ -805,8 +805,10 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
     /// every refresh would drop a selection the user had made in a finished
     /// answer, and the panel refreshes on every tool call.
     private func setAnswer(_ text: String, streaming: Bool) {
-        if answerText.string != text {
-            answerText.string = text
+        if answerText.string != MarkdownRendering.plainText(text) {
+            // The source is markdown and the reader is a person. Set through the text
+            // storage rather than `string`, which would drop every attribute.
+            answerText.textStorage?.setAttributedString(MarkdownRendering.attributed(text))
             if streaming {
                 // Follow the tail while it is being written; a finished answer is
                 // left where the reader put it.

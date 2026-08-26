@@ -288,6 +288,50 @@ public final class LocalLLMSession {
 
     // MARK: - The tool loop
 
+    /// What the panel prints, as opposed to what the model actually emitted.
+    ///
+    /// The two are not the same thing while a tool loop is running. `answer` holds the
+    /// contract -- JSON -- and showing it put `{"tool": "click", "arguments": {...}}` in
+    /// the reply box where a person looks for a reply. Plain chat has no such envelope,
+    /// so with no tool runner attached this is just the answer.
+    public var visibleAnswer: String {
+        guard toolRunner != nil else { return answer }
+        // Settled turns have already been unwrapped by `advance`; re-parsing prose that
+        // happens to start with a brace would blank a legitimate reply.
+        switch phase {
+        case .done, .failed, .cancelled: return answer
+        case .idle, .queued, .generating, .acting:
+            return ToolCallContract.streamingProse(spokenTurn()) ?? ""
+        }
+    }
+
+    /// The turn's output, wherever the server happened to put it.
+    ///
+    /// The model routinely emits its whole move on the reasoning channel and leaves the
+    /// answer channel empty. Not occasionally -- four times in one measured 58-message
+    /// conversation, each one a perfectly well-formed move sitting in `thinking`:
+    ///
+    ///     25 ASST   0자  ''
+    ///           thinking 36자: {"answer": "Google Chrome을 실행했습니다."}
+    ///
+    /// Read from `answer` alone that is an empty response, so the loop spent its one
+    /// correction re-asking for a format the model had already produced. It worked --
+    /// every one of those four recovered on the retry -- which is exactly why it went
+    /// unnoticed: the cost was a wasted round trip, and on a single-worker local model
+    /// that is seconds. The failure only surfaced when a task leaked twice, spent the
+    /// correction on the first, and had nothing left when the closing answer leaked too.
+    /// The search had already succeeded; only the report of it failed.
+    ///
+    /// So this is not a parsing fix and not a prompt fix. The contract was never broken;
+    /// the text arrived on the other channel. Narrow on purpose -- `thinking` is
+    /// consulted only when there is no answer at all, so a model that reasons out loud
+    /// and then answers is still read from its answer.
+    private func spokenTurn() -> String {
+        let spoken = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard spoken.isEmpty else { return answer }
+        return thinking
+    }
+
     /// Reads the finished answer as a move in the contract and plays it.
     ///
     /// - Returns: true when the exchange continues -- a tool is running, or a correction
@@ -296,7 +340,7 @@ public final class LocalLLMSession {
     private func advance() -> Bool {
         guard let toolRunner else { return false }
 
-        switch ToolCallContract.parse(answer, tools: toolRunner.toolCatalog) {
+        switch ToolCallContract.parse(spokenTurn(), tools: toolRunner.toolCatalog) {
         case .answer(let text):
             // What the panel shows is the prose the model wrote, never the JSON it
             // wrote it inside. This is the only place `answer` is rewritten.

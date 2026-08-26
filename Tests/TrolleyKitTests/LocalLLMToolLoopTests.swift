@@ -69,6 +69,137 @@ final class LocalLLMToolLoopTests: XCTestCase {
         return (session, runner, box.turns)
     }
 
+    /// Same as `run`, but each scripted turn says which channel the server put it on.
+    ///
+    /// The distinction is the whole point of these tests: the server splits the model's
+    /// output into `answer` and `thinking`, and the model does not reliably use the one
+    /// the loop was reading.
+    private func runChannelled(
+        turns script: [(kind: String, text: String)],
+        results: [String] = [],
+        prompt: String = "크롬 열어줘"
+    ) -> (session: LocalLLMSession, runner: FakeRunner) {
+        let runner = FakeRunner()
+        runner.results = results
+        var remaining = script
+
+        let session = LocalLLMSession(
+            makeTurn: { { _, _, _, onEvent in
+                let turn = remaining.isEmpty
+                    ? (kind: "answer", text: #"{"answer": "끝"}"#)
+                    : remaining.removeFirst()
+                onEvent(.started(backend: "fake"))
+                onEvent(.token(kind: turn.kind, text: turn.text))
+                onEvent(.finished)
+                return FakeHandle()
+            } },
+            makeWikiPreamble: { _ in nil },
+            commitWikiPreamble: { _, _ in },
+            toolRunner: runner
+        )
+        session.send(prompt)
+        return (session, runner)
+    }
+
+    // MARK: - Which channel the move arrived on
+
+    /// Measured, not hypothetical. In one 58-message conversation the model put its
+    /// entire move on the reasoning channel four separate times, leaving the answer
+    /// channel empty:
+    ///
+    ///     25 ASST   0자  ''
+    ///           thinking 36자: {"answer": "Google Chrome을 실행했습니다."}
+    func testAMoveLeftOnTheReasoningChannelIsStillRead() {
+        let (session, _) = runChannelled(turns: [
+            (kind: "thinking", text: #"{"answer": "크롬을 열었습니다."}"#)
+        ])
+        XCTAssertEqual(session.answer, "크롬을 열었습니다.")
+        XCTAssertEqual(session.phase, .done)
+    }
+
+    /// A tool call leaks the same way, and losing one costs a whole round trip.
+    func testAToolCallOnTheReasoningChannelStillRuns() {
+        let (session, runner) = runChannelled(
+            turns: [
+                (kind: "thinking", text: #"{"tool": "launch_app", "arguments": {"bundleId": "com.google.Chrome"}}"#),
+                (kind: "answer", text: #"{"answer": "열었습니다."}"#)
+            ],
+            results: [#"{"launched": true}"#]
+        )
+        XCTAssertEqual(runner.calls.map(\.name), ["launch_app"])
+        XCTAssertEqual(session.answer, "열었습니다.")
+    }
+
+    /// The fallback is narrow on purpose. A model that reasons out loud and *then*
+    /// answers must be read from its answer -- otherwise fixing the leak would break
+    /// every well-behaved turn.
+    func testReasoningIsIgnoredWhenThereIsARealAnswer() {
+        let runner = FakeRunner()
+        let session = LocalLLMSession(
+            makeTurn: { { _, _, _, onEvent in
+                onEvent(.started(backend: "fake"))
+                onEvent(.token(kind: "thinking", text: #"{"answer": "생각 중에 흘린 말"}"#))
+                onEvent(.token(kind: "answer", text: #"{"answer": "진짜 답"}"#))
+                onEvent(.finished)
+                return FakeHandle()
+            } },
+            makeWikiPreamble: { _ in nil },
+            commitWikiPreamble: { _, _ in },
+            toolRunner: runner
+        )
+        session.send("질문")
+        XCTAssertEqual(session.answer, "진짜 답")
+    }
+
+    /// Whitespace on the answer channel is not an answer -- the leak often leaves a
+    /// stray newline behind rather than nothing at all.
+    func testWhitespaceOnlyAnswerFallsBackToReasoning() {
+        let runner = FakeRunner()
+        let session = LocalLLMSession(
+            makeTurn: { { _, _, _, onEvent in
+                onEvent(.started(backend: "fake"))
+                onEvent(.token(kind: "answer", text: "\n  "))
+                onEvent(.token(kind: "thinking", text: #"{"answer": "채널 밖의 답"}"#))
+                onEvent(.finished)
+                return FakeHandle()
+            } },
+            makeWikiPreamble: { _ in nil },
+            commitWikiPreamble: { _, _ in },
+            toolRunner: runner
+        )
+        session.send("질문")
+        XCTAssertEqual(session.answer, "채널 밖의 답")
+    }
+
+    /// The regression this was found by. Six tool steps, the channel leaking twice:
+    /// before the fix the first leak spent the one correction and the second -- the
+    /// closing answer, after the work had already succeeded -- failed the whole turn
+    /// with "모델이 형식을 지키지 못했습니다".
+    func testTwoLeaksInOneExchangeNoLongerExhaustTheCorrection() {
+        let (session, runner) = runChannelled(
+            turns: [
+                (kind: "thinking", text: #"{"tool": "launch_app", "arguments": {"bundleId": "com.google.Chrome"}}"#),
+                (kind: "answer", text: #"{"tool": "type_text", "arguments": {"text": "장위동"}}"#),
+                (kind: "thinking", text: #"{"answer": "장위동 검색 결과를 띄웠습니다."}"#)
+            ],
+            results: [#"{"ok": true}"#, #"{"ok": true}"#]
+        )
+        XCTAssertEqual(runner.calls.map(\.name), ["launch_app", "type_text"])
+        XCTAssertEqual(session.answer, "장위동 검색 결과를 띄웠습니다.")
+        XCTAssertEqual(session.phase, .done)
+    }
+
+    /// Both channels empty is still nothing, and still gets the one correction. The
+    /// fallback must not swallow the case it was never about.
+    func testBothChannelsEmptyStillAsksForACorrection() {
+        let (session, _) = runChannelled(turns: [
+            (kind: "answer", text: ""),
+            (kind: "answer", text: #"{"answer": "다시 냈습니다."}"#)
+        ])
+        XCTAssertEqual(session.answer, "다시 냈습니다.")
+        XCTAssertEqual(session.phase, .done)
+    }
+
     /// The script and the transcript, shared by reference so the closure above can both
     /// consume and record without capturing `inout` state.
     private final class Box {

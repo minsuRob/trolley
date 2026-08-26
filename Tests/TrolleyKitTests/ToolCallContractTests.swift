@@ -213,3 +213,48 @@ final class ToolCallContractTests: XCTestCase {
         XCTAssertEqual(message, "[도구 결과] click\n{\"ok\":true}")
     }
 }
+
+/// The panel is the one surface that belongs to the person asking. What used to reach it
+/// was the wire format -- a half-typed `{"tool": "click", "arguments": {...}}` sitting
+/// where the reply goes.
+final class StreamingProseTests: XCTestCase {
+    private func prose(_ raw: String) -> String? { ToolCallContract.streamingProse(raw) }
+
+    func testToolCallsSaySomethingElseEntirely() {
+        XCTAssertNil(prose(#"{"tool": "click", "arguments": {"elementId": "e3"}}"#))
+    }
+
+    /// The failure in the screenshot: a call still being written is still a call.
+    func testAHalfWrittenToolCallIsAlsoSilent() {
+        XCTAssertNil(prose(#"{"tool": "click", "argum"#))
+    }
+
+    /// Too few characters to tell yet. Guessing here would flash a fragment of a tool
+    /// call before it could be recognised.
+    func testAnUnopenedEnvelopeIsSilent() {
+        XCTAssertNil(prose("{"))
+        XCTAssertNil(prose(#"{"t"#))
+        XCTAssertNil(prose("   "))
+    }
+
+    /// The reason this is not just "hide anything with a brace": the answer has to
+    /// arrive a token at a time, the way any chat does.
+    func testAnAnswerStreamsAsItIsWritten() {
+        XCTAssertEqual(prose(#"{"answer": "크롬을 여"#), "크롬을 여")
+        XCTAssertEqual(prose(#"{"answer": "크롬을 열었습니다."}"#), "크롬을 열었습니다.")
+    }
+
+    func testEscapesInAPartialValueAreUnwrapped() {
+        XCTAssertEqual(prose(#"{"answer": "첫 줄\n둘째 줄"#), "첫 줄\n둘째 줄")
+        XCTAssertEqual(prose(#"{"answer": "그는 \"안녕\" 이라 했다"#), "그는 \"안녕\" 이라 했다")
+    }
+
+    /// A model that skips the envelope is answering; there is nothing to open.
+    func testPlainProsePassesThrough() {
+        XCTAssertEqual(prose("크롬을 열었습니다."), "크롬을 열었습니다.")
+    }
+
+    func testFencesAreStrippedFirst() {
+        XCTAssertNil(prose("```json\n{\"tool\": \"click\"}\n```"))
+    }
+}

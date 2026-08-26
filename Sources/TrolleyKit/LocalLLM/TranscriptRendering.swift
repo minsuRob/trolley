@@ -92,10 +92,19 @@ public enum TranscriptRendering {
         return answer
     }
 
-    /// `[도구 결과] snapshot {"nodeCount":53,...}` becomes `snapshot`.
+    /// `[도구 결과] snapshot\n{"nodeCount":53,...}` becomes `snapshot`.
+    ///
+    /// Split on any whitespace, newlines included. `resultMessage` puts the payload on
+    /// the *next line*, not after a space, so splitting on " " alone matched nothing and
+    /// the whole four-thousand-character tree came back as the "name" -- which is the one
+    /// thing this view exists to prevent. The unit test missed it by hand-writing the
+    /// separator instead of asking `ToolCallContract.resultMessage` for it.
     private static func toolResultSummary(_ content: String) -> String {
-        let body = content.dropFirst("[도구 결과]".count).trimmingCharacters(in: .whitespaces)
-        guard let name = body.split(separator: " ", maxSplits: 1).first else { return "도구 결과" }
+        let body = content.dropFirst("[도구 결과]".count)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let name = body.split(whereSeparator: \.isWhitespace).first else {
+            return "도구 결과"
+        }
         return String(name)
     }
 

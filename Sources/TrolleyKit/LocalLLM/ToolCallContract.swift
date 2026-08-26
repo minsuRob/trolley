@@ -130,6 +130,64 @@ public enum ToolCallContract {
         "\(limit)단계 안에 끝내지 못했습니다."
     }
 
+    // MARK: - What the person is allowed to see
+
+    /// The prose to print while a turn is still streaming, or nil when there is nothing
+    /// a person should be shown yet.
+    ///
+    /// The panel used to print the raw stream, and the raw stream is the contract: a
+    /// half-typed `{"tool": "click", "arguments": {"elementId": "e3", ...}}` sat in the
+    /// reply box where the answer goes. That is trolley's protocol leaking into the one
+    /// surface that exists for the person -- they asked a question, not for a wire
+    /// format.
+    ///
+    /// Suppressing every brace would fix that and cost the streaming: the final answer
+    /// would appear all at once when the turn ended. So an answer-shaped payload is
+    /// unwrapped *as it arrives* -- `{"answer": "크롬을 여` prints as `크롬을 여` -- and a
+    /// tool-shaped one returns nil, because a tool call has nothing to say. The status
+    /// line ("도구 실행 중 — snapshot") is what speaks during those.
+    public static func streamingProse(_ raw: String) -> String? {
+        let text = stripFences(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        // A model that answers in plain prose is answering; there is no envelope to open.
+        guard text.hasPrefix("{") else { return text }
+
+        guard let range = text.range(of: "\"answer\"") else {
+            // `{"tool"` -- or too few characters to tell yet. Both are silence: guessing
+            // early would flash a fragment of a tool call before it could be recognised.
+            return nil
+        }
+        let rest = text[range.upperBound...]
+        guard let open = rest.firstIndex(of: "\"") else { return nil }
+        return unescape(String(rest[rest.index(after: open)...]))
+    }
+
+    /// Enough of JSON string unescaping for a value that is still being written -- there
+    /// is no closing quote to parse against, so `JSONSerialization` cannot be used here.
+    private static func unescape(_ partial: String) -> String {
+        var out = ""
+        var escaped = false
+        for character in partial {
+            if escaped {
+                switch character {
+                case "n": out.append("\n")
+                case "t": out.append("\t")
+                case "\"": out.append("\"")
+                case "\\": out.append("\\")
+                case "/": out.append("/")
+                default: out.append(character)
+                }
+                escaped = false
+                continue
+            }
+            if character == "\\" { escaped = true; continue }
+            // The closing quote of the value: everything after it is envelope again.
+            if character == "\"" { break }
+            out.append(character)
+        }
+        return out
+    }
+
     // MARK: - Reading the answer back
 
     /// Pulls a tool call or a final answer out of whatever the model produced.
