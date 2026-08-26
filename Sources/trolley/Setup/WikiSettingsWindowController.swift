@@ -455,7 +455,7 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
         // The number this window exists to show: what the filter costs the model. 96,000
         // is the server's measured soft context limit, so the share of it is the honest
         // unit -- characters alone mean nothing to someone choosing a checkbox.
-        let tokens = Int(Double(digest.characters) / 2.2)
+        let tokens = WikiDigestRenderer.approximateTokens(characters: digest.characters)
         var summary = "\(digest.matched)/\(digest.total)건 · \(digest.characters)자"
         summary += " · 예산의 \(Int((Double(digest.characters) / Double(budget) * 100).rounded()))%"
         summary += " · 96K 컨텍스트의 \(String(format: "%.1f", Double(tokens) / 960))%"

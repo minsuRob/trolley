@@ -25,13 +25,53 @@ public final class LocalLLMClient {
     }
 
     /// What `/api/status` says. Enough to show whether asking now is going to
-    /// mean waiting.
+    /// mean waiting -- and, behind "자세히", how much room is left before it does.
+    ///
+    /// Everything after `waiting` is optional because a server older than this
+    /// client will not send it. A missing number stays missing all the way to the
+    /// screen: the alternative is a table that reports a confident zero for
+    /// something it never heard, which is worse than saying 확인 중….
     public struct Status: Equatable {
         public let model: String?
         public let defaultBackend: String?
         public let localLoaded: Bool
         public let busy: Bool
         public let waiting: Int
+        /// Tokens one question may occupy, as this server was started.
+        public let maxContext: Int?
+        /// The measured ceiling `--max-context` is clamped to.
+        public let hardContextLimit: Int?
+        /// Places in line before the server starts answering 503.
+        public let maxQueueDepth: Int?
+        /// Peak memory of the last local generation. Nil until one has run --
+        /// a freshly started server genuinely does not know yet.
+        public let lastPeakGB: Double?
+        public let totalJobs: Int?
+        public let remoteActive: Int?
+        public let remoteLimit: Int?
+
+        /// Split out of `status(completion:)` so the mapping is a pure function a
+        /// test can reach without a server. That is also the only way the rule
+        /// above -- missing stays missing -- can be held to by anything but eyes.
+        public init(json: [String: Any]) {
+            model = json["model"] as? String
+            defaultBackend = json["default_backend"] as? String
+            localLoaded = json["local_loaded"] as? Bool ?? false
+            busy = json["busy"] as? Bool ?? false
+            waiting = json["waiting"] as? Int ?? 0
+            maxContext = json["max_context"] as? Int
+            hardContextLimit = json["hard_context_limit"] as? Int
+            maxQueueDepth = json["max_queue_depth"] as? Int
+            // `as? Double` alone drops an integral peak: the server rounds to two
+            // places, so a run that peaked at exactly 24GB arrives as `24`, and
+            // the row would then say "아직 답한 적이 없어" about a model that just
+            // answered.
+            lastPeakGB = (json["last_peak_gb"] as? Double)
+                ?? (json["last_peak_gb"] as? Int).map(Double.init)
+            totalJobs = json["total_jobs"] as? Int
+            remoteActive = json["remote_active"] as? Int
+            remoteLimit = json["remote_limit"] as? Int
+        }
     }
 
     public enum Event {
@@ -116,13 +156,7 @@ public final class LocalLLMClient {
         Task {
             do {
                 let json = try await getJSON(path: "/api/status")
-                let status = Status(
-                    model: json["model"] as? String,
-                    defaultBackend: json["default_backend"] as? String,
-                    localLoaded: json["local_loaded"] as? Bool ?? false,
-                    busy: json["busy"] as? Bool ?? false,
-                    waiting: json["waiting"] as? Int ?? 0
-                )
+                let status = Status(json: json)
                 await MainActor.run { completion(.success(status)) }
             } catch let failure as Failure {
                 await MainActor.run { completion(.failure(failure)) }

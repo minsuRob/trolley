@@ -166,3 +166,13 @@ final class WikiDigestTests: XCTestCase {
         XCTAssertTrue(WikiDigestRenderer.describe(filter).contains("담당=미지정"))
     }
 }
+
+final class WikiTokenEstimateTests: XCTestCase {
+    /// Three screens quote this figure; they now quote one function. These are the
+    /// values those screens were showing before it was extracted.
+    func testMatchesTheEstimateTheScreensUsedToComputeInline() {
+        XCTAssertEqual(WikiDigestRenderer.approximateTokens(characters: 9_000), 4_090)
+        XCTAssertEqual(WikiDigestRenderer.approximateTokens(characters: 7_664), 3_483)
+        XCTAssertEqual(WikiDigestRenderer.approximateTokens(characters: 0), 0)
+    }
+}

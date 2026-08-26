@@ -155,3 +155,58 @@ final class LocalLLMDraftTests: XCTestCase {
         XCTAssertEqual(LocalLLMSession.condenseDraft("하늘은 파랗다"), "하늘은 파랗다")
     }
 }
+
+/// `/api/status` serves more than the dot needs; "자세히" now spends the rest.
+/// Parsing is a pure function precisely so these two cases are reachable.
+final class LocalLLMStatusParsingTests: XCTestCase {
+    func testReadsEveryHeadroomFieldTheServerSends() {
+        let status = LocalLLMClient.Status(json: [
+            "model": "mlx-community/diffusiongemma-26B-A4B-it-4bit",
+            "default_backend": "local-diffusiongemma",
+            "local_loaded": true,
+            "busy": false,
+            "waiting": 2,
+            "max_context": 96_000,
+            "hard_context_limit": 120_000,
+            "max_queue_depth": 8,
+            "last_peak_gb": 24.6,
+            "total_jobs": 38,
+            "remote_active": 1,
+            "remote_limit": 4
+        ])
+        XCTAssertEqual(status.model, "mlx-community/diffusiongemma-26B-A4B-it-4bit")
+        XCTAssertEqual(status.waiting, 2)
+        XCTAssertEqual(status.maxContext, 96_000)
+        XCTAssertEqual(status.hardContextLimit, 120_000)
+        XCTAssertEqual(status.maxQueueDepth, 8)
+        XCTAssertEqual(status.lastPeakGB, 24.6)
+        XCTAssertEqual(status.totalJobs, 38)
+        XCTAssertEqual(status.remoteActive, 1)
+        XCTAssertEqual(status.remoteLimit, 4)
+    }
+
+    /// A server older than this client, and a server that has not generated
+    /// anything yet, look the same here: the field is simply absent. Neither may
+    /// turn into a zero -- the setup window prints these numbers at people.
+    func testMissingFieldsStayMissingRatherThanBecomingZero() {
+        let status = LocalLLMClient.Status(json: [
+            "model": "x", "local_loaded": true, "busy": false, "waiting": 0
+        ])
+        XCTAssertEqual(status.model, "x")
+        XCTAssertTrue(status.localLoaded)
+        XCTAssertNil(status.maxContext)
+        XCTAssertNil(status.hardContextLimit)
+        XCTAssertNil(status.maxQueueDepth)
+        XCTAssertNil(status.lastPeakGB)
+        XCTAssertNil(status.totalJobs)
+        XCTAssertNil(status.remoteActive)
+        XCTAssertNil(status.remoteLimit)
+    }
+
+    /// The server rounds the peak, so an exactly-integral GB arrives as a bare
+    /// number. Reading it as Int-only would drop the row on those runs.
+    func testAnIntegralPeakIsStillRead() {
+        let status = LocalLLMClient.Status(json: ["last_peak_gb": 24])
+        XCTAssertEqual(status.lastPeakGB, 24)
+    }
+}
