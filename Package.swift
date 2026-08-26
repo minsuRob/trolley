@@ -49,6 +49,14 @@ let package = Package(
             name: "TrolleyWidgetTests",
             dependencies: ["TrolleyWidget"],
             swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        // The executable target holds the app shell -- the menu bar and the setup
+        // window. Their wording and shape are the parts a user actually reads, so
+        // they are worth asserting even though the AppKit around them is not.
+        .testTarget(
+            name: "trolleyTests",
+            dependencies: ["trolley"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
         )
     ]
 )

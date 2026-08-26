@@ -11,12 +11,39 @@ import TrolleyKit
 /// classic one, which is why the install location is checked first.
 final class SetupWindowController: NSObject, NSWindowDelegate {
     private let window: NSWindow
-    private let locationRow = SetupRow(title: "설치 위치")
-    private let accessibilityRow = SetupRow(title: "손쉬운 사용")
-    private let screenRow = SetupRow(title: "화면 기록")
-    private let mcpRow = SetupRow(title: "Claude Code 연결")
-    private let pathLabel = NSTextField(labelWithString: "")
+    private let locationRow = SetupRow(title: SetupCopy.locationTitle)
+    private let accessibilityRow = SetupRow(title: SetupCopy.accessibilityTitle)
+    private let screenRow = SetupRow(title: SetupCopy.screenRecordingTitle)
+    private let mcpRow = SetupRow(title: SetupCopy.mcpTitle)
+    private let llmRow = SetupRow(title: SetupCopy.llmTitle)
+    private let wikiRow = SetupRow(title: "LLM 위키")
     private var refreshTimer: Timer?
+
+    /// The two faces of this window. Both are built once in `makeContentView()`
+    /// and only ever hidden -- never rebuilt. This window has a crash history
+    /// around its own lifetime (`isReleasedWhenClosed = false`), and `refresh()`
+    /// runs every 1.5 seconds, so anything that recreates views here would be
+    /// paying that cost forty times a minute as well as risking the old bug.
+    private let readyGroup = NSStackView()
+    private let checklistGroup = NSStackView()
+    private let detailsGroup = NSStackView()
+    private let detailsGrid = NSStackView()
+    private let rootStack = NSStackView()
+    private let container = NSView()
+    private let disclosure = NSButton()
+    private lazy var detailsExpanded = UserDefaults.standard.bool(forKey: Self.detailsKey)
+    private static let detailsKey = "trolley.setup.detailsExpanded"
+    private static let contentWidth: CGFloat = 460
+    private static let minContentHeight: CGFloat = 180
+
+    /// Opens the prompt box. Set by `WelcomeFlow`; the ready screen's button is
+    /// hidden without it, since a button that does nothing is worse than none.
+    var onAsk: (() -> Void)?
+    /// Fired the first time this window sees everything go green. `WelcomeFlow`
+    /// uses it to introduce the prompt box once.
+    var onBecameReady: (() -> Void)?
+    private var wasReady = false
+    private weak var askButton: NSButton?
 
     /// Both cached because they shell out; the timer must not run them twice a
     /// second. Re-checked on a slower beat so registering from a terminal still
@@ -26,12 +53,30 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     private var mcpCheckInFlight = false
     private var claudePath: String??
 
+    /// One controller for the life of the window, like the setup window itself: a
+    /// window that has already released itself on close takes the process down when
+    /// anything touches it again.
+    private lazy var wikiSettings = WikiSettingsWindowController()
+
+    /// Same treatment as the MCP and LLM rows. Walking the wiki is fast -- 25ms for
+    /// the real vault's 110 files -- but 1.5-second repaints would still mean 40 disk
+    /// walks a minute for a folder nobody is editing.
+    private var wikiSummary: String?
+    private var wikiState: SetupRow.State = .optional
+    private var lastWikiCheck: Date?
+
+    /// Same treatment as the MCP row: a network round trip must not ride the
+    /// 1.5-second repaint timer.
+    private var llmStatus: Result<LocalLLMClient.Status, LocalLLMClient.Failure>?
+    private var lastLLMCheck: Date?
+    private var llmCheckInFlight = false
+
     private var executablePath: String { AccessibilityPermission.currentExecutablePath() }
     private var bundlePath: String { Bundle.main.bundleURL.path }
 
     override init() {
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 330),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 420),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -57,9 +102,14 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         refresh()
         // Permissions are granted in System Settings, in another app -- polling
         // is how the window notices.
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+        // `.common` rather than `scheduledTimer`'s default mode: "설정" is now
+        // usually reached from the status menu, and a `.default`-only timer stalls
+        // for as long as a menu is tracking or a window is being dragged.
+        let timer = Timer(timeInterval: 1.5, repeats: true) { [weak self] _ in
             self?.refresh()
         }
+        RunLoop.main.add(timer, forMode: .common)
+        refreshTimer = timer
     }
 
     var isVisible: Bool { window.isVisible }
@@ -93,75 +143,380 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     // MARK: - Layout
 
     private func makeContentView() -> NSView {
-        let heading = NSTextField(labelWithString: "위 세 가지가 준비되면 trolley는 동작합니다.")
-        heading.font = .systemFont(ofSize: 13, weight: .semibold)
+        buildChecklistGroup()
+        buildReadyGroup()
+        buildDetailsGroup()
 
-        pathLabel.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
-        pathLabel.textColor = .tertiaryLabelColor
-        pathLabel.lineBreakMode = .byTruncatingMiddle
+        // `llmRow` stays out of "자세히" on purpose: it is the thing that answers,
+        // so a window that says 준비 완료 while it is unreachable would let someone
+        // find out by asking a question and getting an error. `wikiRow` keeps its
+        // place beside it, untouched.
+        rootStack.orientation = .vertical
+        rootStack.alignment = .leading
+        rootStack.spacing = 14
+        rootStack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 16, right: 20)
+        rootStack.translatesAutoresizingMaskIntoConstraints = false
+        for view in [readyGroup, checklistGroup, llmRow, wikiRow, disclosureRow(), detailsGroup] {
+            rootStack.addArrangedSubview(view)
+        }
 
-        let stack = NSStackView(views: [
-            heading, locationRow, accessibilityRow, screenRow, mcpRow, NSView(), pathLabel
-        ])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 14
-        stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 16, right: 20)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        let container = NSView()
-        container.addSubview(stack)
+        container.addSubview(rootStack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: container.topAnchor),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor)
+            rootStack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            rootStack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            rootStack.topAnchor.constraint(equalTo: container.topAnchor),
+            rootStack.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor)
         ])
         return container
+    }
+
+    private func buildChecklistGroup() {
+        let heading = NSTextField(labelWithString: SetupCopy.checklistHeading)
+        heading.font = .systemFont(ofSize: 13, weight: .semibold)
+
+        checklistGroup.orientation = .vertical
+        checklistGroup.alignment = .leading
+        checklistGroup.spacing = 14
+        for view in [heading, locationRow, accessibilityRow, screenRow] {
+            checklistGroup.addArrangedSubview(view)
+        }
+    }
+
+    private func buildReadyGroup() {
+        let title = NSTextField(labelWithString: SetupCopy.readyTitle)
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+
+        readyGroup.orientation = .vertical
+        readyGroup.alignment = .leading
+        readyGroup.spacing = 6
+        readyGroup.addArrangedSubview(title)
+        for step in SetupCopy.readySteps {
+            readyGroup.addArrangedSubview(bodyLabel(step, color: .labelColor))
+        }
+        readyGroup.addArrangedSubview(bodyLabel(SetupCopy.readyExample, color: .tertiaryLabelColor))
+
+        let ask = NSButton(title: SetupCopy.readyButton, target: self, action: #selector(askNow))
+        ask.bezelStyle = .rounded
+        ask.keyEquivalent = "\r"
+        askButton = ask
+        readyGroup.addArrangedSubview(ask)
+
+        readyGroup.addArrangedSubview(
+            bodyLabel(SetupCopy.readyFooter, color: .secondaryLabelColor)
+        )
+    }
+
+    private func buildDetailsGroup() {
+        detailsGrid.orientation = .vertical
+        detailsGrid.alignment = .leading
+        detailsGrid.spacing = 3
+
+        let copy = NSButton(
+            title: SetupCopy.detailsCopyButton, target: self, action: #selector(copyDiagnostics)
+        )
+        copy.bezelStyle = .rounded
+        copy.controlSize = .small
+
+        detailsGroup.orientation = .vertical
+        detailsGroup.alignment = .leading
+        detailsGroup.spacing = 10
+        for view in [mcpRow, detailsGrid, copy] {
+            detailsGroup.addArrangedSubview(view)
+        }
+    }
+
+    private func disclosureRow() -> NSView {
+        disclosure.bezelStyle = .disclosure
+        disclosure.setButtonType(.pushOnPushOff)
+        disclosure.title = ""
+        disclosure.state = detailsExpanded ? .on : .off
+        disclosure.target = self
+        disclosure.action = #selector(toggleDetails)
+
+        // The word is clickable too -- a bare triangle is a small target and reads
+        // as decoration.
+        let label = NSButton(
+            title: SetupCopy.detailsToggle, target: self, action: #selector(toggleDetails)
+        )
+        label.bezelStyle = .inline
+        label.isBordered = false
+        label.contentTintColor = .secondaryLabelColor
+
+        let row = NSStackView(views: [disclosure, label])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 2
+        return row
+    }
+
+    private func bodyLabel(_ text: String, color: NSColor) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = .systemFont(ofSize: 11)
+        label.textColor = color
+        label.lineBreakMode = .byWordWrapping
+        label.maximumNumberOfLines = 3
+        label.preferredMaxLayoutWidth = Self.contentWidth - 40
+        return label
     }
 
     // MARK: - State
 
     private func refresh() {
-        pathLabel.stringValue = executablePath
-
         let location = InstallLocation.detect(bundlePath: bundlePath)
-        switch location {
-        case .applications:
-            locationRow.update(state: .done, detail: "응용 프로그램 폴더에 설치됨", button: nil, action: nil)
-        case .diskImage:
-            locationRow.update(
-                state: .blocked,
-                detail: "디스크 이미지에서 실행 중입니다. 여기서 준 권한은 이미지를 꺼내면 사라집니다.",
-                button: "Applications로 이동",
-                action: { [weak self] in self?.moveToApplications() }
-            )
-        case .elsewhere:
-            locationRow.update(
-                state: .actionNeeded,
-                detail: "응용 프로그램 폴더 밖입니다. 옮기면 경로가 고정돼 권한이 유지됩니다.",
-                button: "Applications로 이동",
-                action: { [weak self] in self?.moveToApplications() }
-            )
+        apply(SetupCopy.location(location), to: locationRow) { [weak self] in
+            self?.moveToApplications()
         }
 
         let trusted = SystemTrustChecker().isProcessTrusted()
-        accessibilityRow.update(
-            state: trusted ? .done : .actionNeeded,
-            detail: trusted ? "허용됨" : "AX 트리를 읽고 조작하려면 필요합니다.",
-            button: trusted ? nil : "허용하기",
-            action: trusted ? nil : { [weak self] in self?.requestAccessibility() }
-        )
+        apply(SetupCopy.accessibility(granted: trusted), to: accessibilityRow) { [weak self] in
+            self?.requestAccessibility()
+        }
 
         let screenRecording = CGPreflightScreenCaptureAccess()
-        screenRow.update(
-            state: screenRecording ? .done : .actionNeeded,
-            detail: screenRecording ? "허용됨" : "screenshot 툴에만 필요합니다. 없어도 나머지는 동작합니다.",
-            button: screenRecording ? nil : "허용하기",
-            action: screenRecording ? nil : { [weak self] in self?.requestScreenRecording() }
-        )
+        apply(SetupCopy.screenRecording(granted: screenRecording), to: screenRow) { [weak self] in
+            self?.requestScreenRecording()
+        }
 
         refreshMCPRow()
+        refreshLLMRow()
+        refreshWikiRow()
+        refreshDetailsGrid()
+        applyMode()
+        syncWindowHeight()
+    }
+
+    /// A row whose copy says there is no button gets no action either -- that is
+    /// what keeps "허용됨" from staying clickable.
+    private func apply(
+        _ content: SetupCopy.RowContent, to row: SetupRow, action: @escaping () -> Void
+    ) {
+        row.update(
+            state: content.state,
+            detail: content.detail,
+            button: content.button,
+            action: content.button == nil ? nil : action
+        )
+    }
+
+    // MARK: - Mode
+
+    /// Which face the window is showing. Re-derived on every tick, so revoking a
+    /// permission in System Settings flips it back to the checklist within 1.5s
+    /// rather than lying until the next launch.
+    private func applyMode() {
+        let ready = Self.isEverythingReady()
+        readyGroup.isHidden = !ready
+        checklistGroup.isHidden = ready
+        askButton?.isHidden = onAsk == nil
+        detailsGroup.isHidden = !detailsExpanded
+
+        if ready && !wasReady {
+            onBecameReady?()
+        }
+        wasReady = ready
+    }
+
+    /// Follows the content, which changes when the mode flips or 자세히 opens.
+    ///
+    /// The delta gate is what makes this safe on a 1.5-second timer: without it
+    /// the window re-frames itself constantly, which fights a drag and reads as a
+    /// flicker. Never animated, and pinned by its top-left corner -- `NSWindow`
+    /// origins are bottom-left, so resizing without this makes the title bar jump.
+    private func syncWindowHeight() {
+        container.layoutSubtreeIfNeeded()
+        let target = max(rootStack.fittingSize.height, Self.minContentHeight)
+        guard abs(target - window.contentLayoutRect.height) > 0.5 else { return }
+        var frame = window.frameRect(
+            forContentRect: NSRect(x: 0, y: 0, width: Self.contentWidth, height: target)
+        )
+        frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
+        window.setFrame(frame, display: true, animate: false)
+    }
+
+    private func refreshDetailsGrid() {
+        guard detailsExpanded else { return }
+        let rows = detailsRows()
+        detailsGrid.arrangedSubviews.forEach {
+            detailsGrid.removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
+        for row in rows {
+            let label = NSTextField(labelWithString: "\(row.label)   \(row.value)")
+            label.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+            label.textColor = .tertiaryLabelColor
+            label.lineBreakMode = .byTruncatingMiddle
+            label.cell?.truncatesLastVisibleLine = true
+            // An explicit width, not just `preferredMaxLayoutWidth`: a single-line
+            // label's intrinsic width otherwise wins and a long path runs off the
+            // side of a fixed-width window instead of ellipsizing. "정보 복사" is
+            // how the untruncated value gets out.
+            label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            label.widthAnchor.constraint(equalToConstant: Self.contentWidth - 40).isActive = true
+            detailsGrid.addArrangedSubview(label)
+        }
+    }
+
+    private func detailsRows() -> [(label: String, value: String)] {
+        let model: String?
+        if case .success(let status) = llmStatus {
+            model = status.model.map(Self.shortModelName)
+        } else {
+            model = nil
+        }
+        return SetupCopy.details(
+            version: TrolleyVersion.display,
+            path: executablePath,
+            model: model,
+            address: LocalLLMSettings.baseURLString,
+            registered: mcpRegistered
+        )
+    }
+
+    @objc private func toggleDetails() {
+        detailsExpanded.toggle()
+        disclosure.state = detailsExpanded ? .on : .off
+        UserDefaults.standard.set(detailsExpanded, forKey: Self.detailsKey)
+        refreshDetailsGrid()
+        detailsGroup.isHidden = !detailsExpanded
+        syncWindowHeight()
+    }
+
+    @objc private func askNow() {
+        onAsk?()
+    }
+
+    @objc private func copyDiagnostics() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(
+            SetupCopy.diagnostics(detailsRows()), forType: .string
+        )
+    }
+
+    // MARK: - LLM 위키
+
+    /// The team's markdown vault, read from a local folder and summarised in front of
+    /// whatever is typed into the prompt box. Optional like Claude Code and the model
+    /// address: trolley automates apps with or without it, so an unset folder is grey.
+    private func refreshWikiRow() {
+        checkWikiIfDue()
+        wikiRow.update(
+            state: wikiState,
+            detail: wikiSummary ?? "확인 중…",
+            button: "설정",
+            action: { [weak self] in self?.wikiSettings.show() }
+        )
+    }
+
+    private func checkWikiIfDue() {
+        if let last = lastWikiCheck, Date().timeIntervalSince(last) < 5 { return }
+        lastWikiCheck = Date()
+
+        let path = WikiSettings.rootPath
+        guard WikiSettings.isEnabled else {
+            wikiState = .optional
+            wikiSummary = "꺼져 있음. 켜면 질문 앞에 위키 요약이 함께 갑니다 — \(path)"
+            return
+        }
+        guard let digest = WikiContext.shared.currentDigest() else {
+            // A folder that cannot be read is orange, not red: a missing wiki never
+            // stops a question from being asked, it just goes out bare.
+            wikiState = .actionNeeded
+            switch WikiContext.shared.lastFailure {
+            case .denied:
+                // Not the same as "not found", and saying so matters -- the vault sits
+                // under ~/Desktop, which macOS gates even for an unsandboxed app, and
+                // "없습니다" sends someone hunting for a folder that never moved.
+                wikiSummary = "폴더에 접근할 수 없습니다. 설정에서 폴더를 다시 고르면 권한이 붙습니다 — \(path)"
+            case .missing:
+                wikiSummary = "폴더를 찾을 수 없습니다 — \(path)"
+            case .noRoot, .none:
+                wikiSummary = "폴더가 지정되지 않았습니다."
+            }
+            return
+        }
+
+        wikiState = .done
+        let tokens = Int(Double(digest.characters) / 2.2)
+        var detail = "\(digest.matched)/\(digest.total)건 · 약 \(tokens)토큰"
+        detail += " (96K의 \(String(format: "%.1f", Double(tokens) / 960))%)"
+        if digest.wasTruncated { detail += " · \(digest.total - digest.matched)건 생략" }
+        wikiSummary = detail + " — " + path
+    }
+
+    // MARK: - Local LLM
+
+    /// The address the widget's prompt box talks to. Optional like Claude Code:
+    /// trolley automates apps whether or not a model is reachable, so an
+    /// unreachable server is grey, not red.
+    private func refreshLLMRow() {
+        // The model id, the address and the queue depth used to be in this line.
+        // They are the exact vocabulary this change is trying to get out of a
+        // first-time user's way, so they moved to "자세히"; what stays is whether
+        // asking will work.
+        let reachable: Bool?
+        switch llmStatus {
+        case .success: reachable = true
+        case .failure: reachable = false
+        case .none: reachable = nil
+        }
+        apply(SetupCopy.llm(reachable: reachable), to: llmRow) { [weak self] in
+            self?.editLLMAddress()
+        }
+        checkLLMIfDue()
+    }
+
+    private func checkLLMIfDue() {
+        guard !llmCheckInFlight else { return }
+        if let last = lastLLMCheck, Date().timeIntervalSince(last) < 5 { return }
+        guard let config = LocalLLMSettings.makeConfig() else {
+            llmStatus = .failure(.unreachable("주소가 비어 있습니다"))
+            return
+        }
+        llmCheckInFlight = true
+        lastLLMCheck = Date()
+        LocalLLMClient(config: config).status { [weak self] result in
+            guard let self else { return }
+            self.llmCheckInFlight = false
+            self.llmStatus = result
+            self.refreshLLMRow()
+        }
+    }
+
+    /// `mlx-community/diffusiongemma-26B-A4B-it-4bit` is most of the row's width
+    /// and none of it is the part that identifies the model.
+    private static func shortModelName(_ full: String) -> String {
+        full.split(separator: "/").last.map(String.init) ?? full
+    }
+
+    private func editLLMAddress() {
+        let alert = NSAlert()
+        alert.messageText = SetupCopy.llmSheetTitle
+        alert.informativeText = SetupCopy.llmSheetBody
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.stringValue = LocalLLMSettings.baseURLString
+        field.placeholderString = LocalLLMSettings.fallbackBaseURL
+        alert.accessoryView = field
+        alert.addButton(withTitle: "저장")
+        alert.addButton(withTitle: "취소")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else { return }
+            let entered = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !entered.isEmpty, LocalLLMSettings.normalize(entered) == nil {
+                self.present(title: "주소를 이해하지 못했습니다", message: entered, critical: true)
+                return
+            }
+            LocalLLMSettings.baseURLString = entered
+            // Re-probe now rather than on the next tick: the point of pressing
+            // save is finding out whether the new address works.
+            self.llmStatus = nil
+            self.lastLLMCheck = nil
+            self.refreshLLMRow()
+        }
+        // The sheet opens with the field ready to be replaced wholesale, which
+        // is what pasting a new URL wants.
+        DispatchQueue.main.async {
+            field.selectText(nil)
+        }
     }
 
     /// Optional by design: trolley works as a CLI without it, and someone who
@@ -169,25 +524,15 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     /// the meantime.
     private func refreshMCPRow() {
         guard let claude = locateClaude() else {
-            mcpRow.update(
-                state: .optional,
-                detail: "선택 사항. claude 명령을 찾지 못했으니, 연결하려면 아래 명령을 터미널에서 실행하세요.",
-                button: "명령 복사",
-                action: { [weak self] in self?.copyManualCommand() }
-            )
+            apply(SetupCopy.mcp(claudeFound: false, registered: nil), to: mcpRow) { [weak self] in
+                self?.copyManualCommand()
+            }
             return
         }
-        if mcpRegistered == true {
-            mcpRow.update(state: .done, detail: "MCP 서버로 등록됨 (user 스코프)", button: "다시 등록", action: { [weak self] in
-                self?.registerMCP(claude: claude)
-            })
-        } else {
-            mcpRow.update(
-                state: .optional,
-                detail: "선택 사항. 지금 연결해도 되고 나중에 이 창을 다시 열어도 됩니다.",
-                button: "연결하기",
-                action: { [weak self] in self?.registerMCP(claude: claude) }
-            )
+        apply(
+            SetupCopy.mcp(claudeFound: true, registered: mcpRegistered), to: mcpRow
+        ) { [weak self] in
+            self?.registerMCP(claude: claude)
         }
         checkRegistrationIfDue(claude: claude)
     }
