@@ -12,7 +12,7 @@ import TrolleyMCP
 /// and the whole point of the loop is that the model and Claude Code drive the same
 /// trolley.
 enum ToolHost {
-    static func makeTools(launcher: AppLauncher, promptQueue: PromptQueue? = nil) -> TrolleyTools {
+    static func makeTools(launcher: AppLauncher) -> TrolleyTools {
         TrolleyTools(
             trustChecker: SystemTrustChecker(),
             locator: WorkspaceAppLocator(),
@@ -28,7 +28,6 @@ enum ToolHost {
                 return app.activate()
             },
             listRunningApps: runningApps,
-            promptQueue: promptQueue,
             // Only when a folder has actually been pointed at. `rootPath` always has a
             // value -- it falls back to a sensible guess -- so the test is whether that
             // folder is really there, not whether the setting is non-empty.

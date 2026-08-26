@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import TrolleyMCP
 
-/// Carries tool-call activity from an `trolley mcp` process to whichever process
+/// Carries tool-call activity to whichever process
 /// owns the widget.
 ///
 /// The widget used to live inside the server, which meant it only existed while
@@ -18,7 +18,7 @@ public enum ActivityBridge {
     public static let started = Notification.Name("ink.markhub.trolley.toolCallStarted")
     public static let finished = Notification.Name("ink.markhub.trolley.toolCallFinished")
 
-    /// Handed to `MCPServer` in place of a widget of our own.
+    /// Handed to the tool runner in place of a widget of our own.
     public static var forwardingObserver: ToolCallObserver {
         ToolCallObserver(
             toolCallStarted: { name in

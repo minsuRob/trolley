@@ -30,7 +30,7 @@ struct CheckPermissionsCommand: ParsableCommand {
         if capturer.hasScreenRecordingAccess() {
             print("screen recording: granted")
         } else {
-            print("screen recording: NOT granted (only needed for the screenshot MCP tool)")
+            print("screen recording: NOT granted (only needed for the screenshot tool)")
             print("Add the same path in System Settings → Privacy & Security → Screen Recording, then restart trolley.")
         }
 

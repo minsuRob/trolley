@@ -6,7 +6,7 @@ import TrolleyKit
 /// Split from `TrolleyTools` because it shares nothing with the rest of the surface:
 /// every other tool needs Accessibility trust and a running app, and these need
 /// neither. They are registered only when a wiki root is configured -- the same
-/// conditional treatment `take_prompt` gets, and for the same reason: a tool that is
+/// conditional treatment the wiki tools get, and for the same reason: a tool that is
 /// listed but cannot work is worse than one that is absent, because the model spends
 /// a call finding out.
 ///

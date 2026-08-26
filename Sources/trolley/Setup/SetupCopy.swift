@@ -113,30 +113,6 @@ enum SetupCopy {
     static let llmSheetTitle = "Local LLM 연결 주소"
     static let llmSheetBody = "평소에는 바꿀 일이 없습니다. 비워두면 기본값으로 돌아갑니다."
 
-    static let mcpTitle = "Claude Code에 연결 (선택)"
-
-    static func mcp(claudeFound: Bool, registered: Bool?) -> RowContent {
-        guard claudeFound else {
-            return RowContent(
-                state: .optional,
-                detail: "Claude Code를 찾지 못했습니다. 설치돼 있다면 명령을 복사해 터미널에 붙여넣으세요.",
-                button: "명령 복사"
-            )
-        }
-        if registered == true {
-            return RowContent(
-                state: .done,
-                detail: "연결됨 — Claude Code 안에서 trolley를 쓸 수 있습니다.",
-                button: "다시 연결"
-            )
-        }
-        return RowContent(
-            state: .optional,
-            detail: "Claude Code를 쓰는 분만 눌러 주세요. 나중에 이 창을 다시 열어도 됩니다.",
-            button: "연결하기"
-        )
-    }
-
     // MARK: - 자세히
 
     static let detailsToggle = "자세히"
@@ -148,15 +124,13 @@ enum SetupCopy {
         version: String,
         path: String,
         model: String?,
-        address: String,
-        registered: Bool?
+        address: String
     ) -> [(label: String, value: String)] {
         [
             ("버전", version),
             ("프로그램 경로", path),
             ("모델", model ?? "확인 중…"),
-            ("서버 주소", address),
-            ("MCP 등록", registered.map { $0 ? "등록됨 (user 스코프)" : "등록 안 됨" } ?? "확인 중…")
+            ("서버 주소", address)
         ]
     }
 
