@@ -176,3 +176,54 @@ final class WikiCommitCountTests: XCTestCase {
         )
     }
 }
+
+/// The digest no longer rides every question.
+///
+/// It is not a preference -- it is what the server's replay makes of it. Every message
+/// of a conversation is re-sent as the prompt on every turn, and the loop posts a
+/// `[도구 결과]` turn per tool call, so a digest "sent once" is re-sent in full for the
+/// life of the thread. The wiki stays reachable as a tool instead.
+final class WikiIsNotInjectedByDefaultTests: XCTestCase {
+    func testDefaultSessionSendsTheQuestionAlone() {
+        var sent: [String] = []
+        let session = LocalLLMSession(
+            makeTurn: {
+                { content, _, _, _ in
+                    sent.append(content)
+                    return NoopStoppable()
+                }
+            }
+        )
+        session.send("크롬 켜줘")
+        XCTAssertEqual(sent, ["크롬 켜줘"])
+    }
+
+    /// The plumbing is intact, so turning it back on is one argument rather than a
+    /// rewrite -- and the wire format stays covered either way.
+    func testAPreambleStillRidesWhenOneIsSupplied() {
+        var sent: [String] = []
+        let session = LocalLLMSession(
+            makeTurn: {
+                { content, _, _, _ in
+                    sent.append(content)
+                    return NoopStoppable()
+                }
+            },
+            makeWikiPreamble: { _ in
+                WikiPreamble(
+                    digest: WikiDigest(
+                        text: "[위키] 목록", hash: "h", matched: 1, total: 1, characters: 8
+                    ),
+                    isRefresh: false
+                )
+            }
+        )
+        session.send("크롬 켜줘")
+        XCTAssertEqual(sent.first?.contains("[위키] 목록"), true)
+        XCTAssertEqual(sent.first?.hasSuffix("크롬 켜줘"), true)
+    }
+}
+
+private final class NoopStoppable: LocalLLMStoppable {
+    func cancel() {}
+}

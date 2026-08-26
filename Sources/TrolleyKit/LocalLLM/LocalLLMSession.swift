@@ -17,10 +17,23 @@ public final class LocalLLMSession {
         /// at a time by design, so waiting is normal rather than a fault.
         case queued(position: Int)
         case generating
+        /// A tool the model asked for is running. Named because the panel would
+        /// otherwise sit on "생성 중" through a `wait_for_element`, and a widget that
+        /// looks stuck while trolley is clicking things is the one state worth
+        /// spelling out.
+        case acting(step: Int, tool: String)
         case done
         case failed(String)
         case cancelled
     }
+
+    /// How many tools the model may run for one question.
+    ///
+    /// Eight because each step is a full round trip through the server's queue on a
+    /// single-worker local model -- at roughly ten seconds a step, this is already a
+    /// minute and a half of a spinning panel. A loop that has not finished by then is
+    /// far more often stuck than close.
+    public static let stepLimit = 8
 
     public private(set) var prompt = ""
     public private(set) var answer = ""
@@ -34,32 +47,57 @@ public final class LocalLLMSession {
 
     public var onChange: (() -> Void)?
 
-    private let makeClient: () -> LocalLLMClient?
+    private let makeTurn: () -> LocalLLMTurn?
     private let makeWikiPreamble: (String?) -> WikiPreamble?
     private let commitWikiPreamble: (WikiPreamble, String) -> Void
-    private var handle: LocalLLMClient.Handle?
+    private var handle: LocalLLMStoppable?
+
+    /// Nil leaves this a plain chat session, which is what `trolley ask` wants.
+    private let toolRunner: LocalLLMToolRunning?
+    /// Tools run so far for the current question, against `stepLimit`.
+    private var step = 0
+    /// Whether the malformed-output correction has already been spent this turn. One
+    /// retry, not a loop: a model that cannot hold the format twice running will not
+    /// hold it the third time either, and every attempt costs a full generation.
+    private var didCorrect = false
 
     /// - Parameters:
-    ///   - makeClient: re-read per send, so changing the address in the setup window
-    ///     takes effect on the next question rather than the next launch.
+    ///   - makeTurn: how one generation is run. Re-read per send, so changing the
+    ///     address in the setup window takes effect on the next question rather than
+    ///     the next launch -- and a closure rather than a client, so the loop's own
+    ///     behaviour can be played out against a scripted model with no server.
     ///   - makeWikiPreamble: the llmwiki list to put in front of this question, or nil.
-    ///     Re-read per send for the same reason, and injected so the wire format can be
-    ///     tested without a wiki on disk or a server to answer.
+    ///     Defaults to nil -- the digest no longer rides every question.
+    ///
+    ///     It used to, and the cost was not what it looked like on paper. The list is
+    ///     capped at a character budget, but the loop posts `[도구 결과]` turns into the
+    ///     same conversation and the server replays *every* message as the prompt, so a
+    ///     digest sent once is re-sent, in full, on every turn of every later task.
+    ///
+    ///     The wiki is still there and still reachable: `ToolHost.wikiTools()` puts it in
+    ///     the tool catalog, so a question that actually needs the vault looks it up and
+    ///     a question about Chrome does not pay for it. Same switch governs both, so
+    ///     "위키 참고: 꺼짐" still means one thing.
     ///   - commitWikiPreamble: records that the model has been told, which is what
     ///     stops the same list from riding along with every later turn.
+    ///   - toolRunner: what turns a tool call into something happening on this Mac.
+    ///     Injected, and nil by default, for two reasons: the loop's behaviour is
+    ///     testable with a fake, and the CLI path keeps the plain chat it had.
     public init(
-        makeClient: @escaping () -> LocalLLMClient? = { LocalLLMSettings.makeConfig().map(LocalLLMClient.init(config:)) },
-        makeWikiPreamble: @escaping (String?) -> WikiPreamble? = { WikiContext.shared.preamble(conversationID: $0) },
-        commitWikiPreamble: @escaping (WikiPreamble, String) -> Void = { WikiContext.shared.commit($0, conversationID: $1) }
+        makeTurn: @escaping () -> LocalLLMTurn? = LocalLLMSession.liveTurn,
+        makeWikiPreamble: @escaping (String?) -> WikiPreamble? = { _ in nil },
+        commitWikiPreamble: @escaping (WikiPreamble, String) -> Void = { WikiContext.shared.commit($0, conversationID: $1) },
+        toolRunner: LocalLLMToolRunning? = nil
     ) {
-        self.makeClient = makeClient
+        self.makeTurn = makeTurn
         self.makeWikiPreamble = makeWikiPreamble
         self.commitWikiPreamble = commitWikiPreamble
+        self.toolRunner = toolRunner
     }
 
     public var isBusy: Bool {
         switch phase {
-        case .queued, .generating: return true
+        case .queued, .generating, .acting: return true
         case .idle, .done, .failed, .cancelled: return false
         }
     }
@@ -76,7 +114,7 @@ public final class LocalLLMSession {
         // one behind it for an answer nobody is going to read.
         handle?.cancel()
 
-        guard let client = makeClient() else {
+        guard let turn = makeTurn() else {
             prompt = trimmed
             answer = ""
             phase = .failed("로컬 LLM 주소가 설정되지 않았습니다")
@@ -92,22 +130,24 @@ public final class LocalLLMSession {
         thinking = ""
         draft = ""
         backend = nil
+        step = 0
+        didCorrect = false
         phase = .queued(position: 0)
         onChange?()
 
         let conversationID = LocalLLMSettings.conversationID
         let preamble = makeWikiPreamble(conversationID)
 
-        handle = client.ask(
-            Self.wire(prompt: trimmed, preamble: preamble),
-            conversationID: conversationID,
-            onConversation: { [commitWikiPreamble] newID in
+        handle = turn(
+            Self.wire(prompt: trimmed, preamble: preamble, tools: toolRunner),
+            conversationID,
+            { [commitWikiPreamble] newID in
                 LocalLLMSettings.conversationID = newID
                 // A fresh conversation only learns its id here, which is why the
                 // commit happens in two places rather than one.
                 if let preamble { commitWikiPreamble(preamble, newID) }
             },
-            onEvent: { [weak self] event in self?.apply(event) }
+            { [weak self] event in self?.apply(event) }
         )
         // Recorded before the answer arrives, on purpose: the server writes the user
         // message before it queues generation, so a cancelled or failed generation
@@ -128,9 +168,24 @@ public final class LocalLLMSession {
     /// The list goes first and the question last. The server takes a single `content`
     /// string with no system-prompt field, so position is the only way to say which
     /// part is the reference material.
-    public static func wire(prompt: String, preamble: WikiPreamble?) -> String {
-        guard let preamble else { return prompt }
-        return preamble.text + "\n\n---\n\n" + prompt
+    ///
+    /// The tool contract goes ahead of even the wiki list: it is the rule for the whole
+    /// exchange, while the wiki is material the question draws on. Both ride on every
+    /// question rather than once per conversation, because the loop's own `[도구 결과]`
+    /// turns sit between one question and the next -- by the time someone asks a second
+    /// thing, the contract can be a dozen messages back.
+    public static func wire(
+        prompt: String, preamble: WikiPreamble?, tools: LocalLLMToolRunning? = nil
+    ) -> String {
+        var parts: [String] = []
+        if let tools {
+            parts.append(ToolCallContract.preamble(
+                tools: tools.toolCatalog, runningApps: tools.runningAppSummaries
+            ))
+        }
+        if let preamble { parts.append(preamble.text) }
+        parts.append(prompt)
+        return parts.joined(separator: "\n\n---\n\n")
     }
 
     public func cancel() {
@@ -141,6 +196,42 @@ public final class LocalLLMSession {
         onChange?()
     }
 
+    /// Drops the thread and starts a clean one.
+    ///
+    /// The button exists because the alternative is invisible. The server replays every
+    /// message of a conversation as the prompt, so a finished task stays in front of the
+    /// model until something clears it -- measured, a "크롬 켜줘" that answered with the
+    /// previous task's closing line, word for word. There is no way to see that from the
+    /// panel and no way to undo it by rephrasing; the only fix is a new thread.
+    ///
+    /// Only the id is dropped. The conversation stays on the server, where its own web UI
+    /// can still show it -- this is a fresh start, not a delete.
+    public func startNewConversation() {
+        handle?.cancel()
+        handle = nil
+        LocalLLMSettings.conversationID = nil
+        clear()
+    }
+
+    /// Reads the current thread back for the transcript view, condensed by
+    /// `TranscriptRendering`. Empty when nothing has been asked yet.
+    public func loadTranscript(completion: @escaping (Result<[TranscriptRendering.Line], Error>) -> Void) {
+        guard let conversationID = LocalLLMSettings.conversationID,
+              let config = LocalLLMSettings.makeConfig()
+        else {
+            completion(.success([]))
+            return
+        }
+        LocalLLMClient(config: config).messages(conversationID: conversationID) { result in
+            switch result {
+            case .success(let messages):
+                completion(.success(TranscriptRendering.lines(from: messages)))
+            case .failure(let failure):
+                completion(.failure(failure))
+            }
+        }
+    }
+
     public func clear() {
         handle?.cancel()
         handle = nil
@@ -149,6 +240,8 @@ public final class LocalLLMSession {
         thinking = ""
         draft = ""
         backend = nil
+        step = 0
+        didCorrect = false
         phase = .idle
         onChange?()
     }
@@ -174,8 +267,13 @@ public final class LocalLLMSession {
             if answer.isEmpty { draft = Self.condenseDraft(text) }
         case .finished:
             draft = ""
-            phase = .done
             handle = nil
+            // The one place the loop hooks in. Everything above is the plain streaming
+            // session; `advance` decides whether this finished answer was actually a
+            // finished answer, and leaves `phase` alone when the exchange goes on.
+            if toolRunner == nil || !advance() {
+                phase = .done
+            }
         case .failed(let message):
             draft = ""
             phase = .failed(message)
@@ -186,6 +284,77 @@ public final class LocalLLMSession {
             handle = nil
         }
         onChange?()
+    }
+
+    // MARK: - The tool loop
+
+    /// Reads the finished answer as a move in the contract and plays it.
+    ///
+    /// - Returns: true when the exchange continues -- a tool is running, or a correction
+    ///   has been sent -- and the caller should leave the phase alone. False when this
+    ///   was the end.
+    private func advance() -> Bool {
+        guard let toolRunner else { return false }
+
+        switch ToolCallContract.parse(answer, tools: toolRunner.toolCatalog) {
+        case .answer(let text):
+            // What the panel shows is the prose the model wrote, never the JSON it
+            // wrote it inside. This is the only place `answer` is rewritten.
+            answer = text
+            return false
+
+        case .malformed(let why):
+            guard !didCorrect else {
+                phase = .failed("모델이 형식을 지키지 못했습니다 — \(why)")
+                return true
+            }
+            didCorrect = true
+            continueExchange(with: ToolCallContract.correction)
+            return true
+
+        case .call(let name, let arguments):
+            guard step < Self.stepLimit else {
+                answer = ToolCallContract.stepLimitMessage(Self.stepLimit)
+                return false
+            }
+            step += 1
+            phase = .acting(step: step, tool: name)
+            // The answer box is cleared per step on purpose: what it held was the tool
+            // call JSON, and leaving that on screen would read as trolley's reply.
+            answer = ""
+            toolRunner.run(name: name, arguments: arguments) { [weak self] result in
+                guard let self, case .acting = self.phase else { return }
+                self.continueExchange(
+                    with: ToolCallContract.resultMessage(tool: name, result: result)
+                )
+            }
+            return true
+        }
+    }
+
+    /// Posts the next turn into the same conversation.
+    ///
+    /// A plain `client.ask` rather than a re-entry through `send`: `send` resets the
+    /// step counter and re-sends the whole contract, which is exactly what must not
+    /// happen in the middle of a loop.
+    private func continueExchange(with content: String) {
+        guard let turn = makeTurn() else {
+            phase = .failed("로컬 LLM 주소가 설정되지 않았습니다")
+            onChange?()
+            return
+        }
+        answer = ""
+        thinking = ""
+        draft = ""
+        phase = .queued(position: 0)
+        onChange?()
+
+        handle = turn(
+            content,
+            LocalLLMSettings.conversationID,
+            { newID in LocalLLMSettings.conversationID = newID },
+            { [weak self] event in self?.apply(event) }
+        )
     }
 
     /// Strips the placeholders out of a denoising preview.
@@ -215,6 +384,8 @@ public final class LocalLLMSession {
             return position <= 0 ? "보내는 중…" : "대기 중 — 앞에 \(position)건"
         case .generating:
             return backend.map { "생성 중 — \($0)" } ?? "생성 중…"
+        case .acting(let step, let tool):
+            return "도구 실행 중 — \(tool) (\(step)/\(LocalLLMSession.stepLimit))"
         case .done:
             return backend.map { "완료 — \($0)" } ?? "완료"
         case .cancelled:

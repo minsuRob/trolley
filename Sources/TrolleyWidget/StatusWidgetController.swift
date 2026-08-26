@@ -65,6 +65,13 @@ public final class StatusWidgetController {
     private let agentReaderAvailable: Bool
     /// One-shot observer for `presentPromptPanel(focus:)`; see there.
     private var activationObserver: NSObjectProtocol?
+    /// Held for the life of the controller: `PromptBridge` is how `trolley prompt`
+    /// reaches the one process whose Accessibility grant actually works.
+    private var promptBridgeObserver: NSObjectProtocol?
+    /// The `trolley prompt` call waiting on the current question, if any. Cleared as
+    /// soon as it is answered so a later question typed into the box does not report
+    /// back to a CLI that has long since exited.
+    private var pendingRequestID: String?
     /// What the user last picked. Not necessarily where prompts go -- see
     /// `effectiveDestination`.
     private var storedDestination = PromptDestination.stored
@@ -145,10 +152,21 @@ public final class StatusWidgetController {
         if onOpenSettings != nil {
             activityPanel.onOpenSettings = { [weak self] in self?.onOpenSettings?() }
         }
+        activityPanel.onNewConversation = { [weak self] in
+            guard let self else { return }
+            self.localLLM.startNewConversation()
+            // The queue is the other destination's memory and is not part of the thread;
+            // clearing it here would throw away prompts the agent has not collected.
+            self.activityPanel.refreshIfVisible(self.makePanelModel())
+        }
+        activityPanel.onLoadTranscript = { [weak self] completion in
+            self?.localLLM.loadTranscript(completion: completion)
+        }
         // Tokens arrive one at a time on the main queue; each one is a repaint.
         localLLM.onChange = { [weak self] in
             guard let self else { return }
             self.activityPanel.refreshIfVisible(self.makePanelModel())
+            self.reportIfSettled()
         }
         // The agent drains from the MCP thread; without this the panel would go
         // on listing prompts that have already been collected.
@@ -428,6 +446,54 @@ public final class StatusWidgetController {
             isRefresh: alreadyToldThisOne && !isSameContent,
             capped: !isSameContent && WikiContext.shared.isRefreshCapped(conversationID: conversationID)
         )
+    }
+
+    /// Starts listening for prompts sent by `trolley prompt`.
+    ///
+    /// Only the app calls this. A prompt arriving here is put through `submitPrompt`,
+    /// the same function the ⏎ key calls, so there is exactly one path a question can
+    /// take and no chance of the two drifting apart.
+    public func acceptRemotePrompts() {
+        promptBridgeObserver = PromptBridge.observeSubmissions { [weak self] text, requestID in
+            guard let self else { return }
+            self.pendingRequestID = requestID.isEmpty ? nil : requestID
+            // Shown, not just run: a prompt that arrives from a terminal should leave
+            // the same visible trace as one that was typed, or the tool calls happen
+            // with nothing on screen accounting for them.
+            self.presentPromptPanel(focus: false)
+            self.submitPrompt(text)
+        }
+    }
+
+    /// Reports the finished exchange back to a waiting `trolley prompt`.
+    ///
+    /// Driven off `onChange` rather than a completion handler because the loop has no
+    /// single end: it settles into `.done`, `.failed` or `.cancelled` after some number
+    /// of tool steps, and those are the three phases worth reporting.
+    private func reportIfSettled() {
+        guard let requestID = pendingRequestID else { return }
+        switch localLLM.phase {
+        case .done:
+            pendingRequestID = nil
+            PromptBridge.answer(requestID: requestID, answer: localLLM.answer, isError: false)
+        case .failed(let message):
+            pendingRequestID = nil
+            PromptBridge.answer(requestID: requestID, answer: message, isError: true)
+        case .cancelled:
+            pendingRequestID = nil
+            PromptBridge.answer(requestID: requestID, answer: "중지됨", isError: true)
+        case .idle:
+            // `clear()` reached us with a question still outstanding -- 새 대화 was
+            // pressed, or the panel was reset, while a `trolley prompt` was waiting.
+            // Measured: without this the caller sits until its timeout for an answer
+            // that was thrown away before it could exist.
+            pendingRequestID = nil
+            PromptBridge.answer(
+                requestID: requestID, answer: "대화가 초기화되었습니다", isError: true
+            )
+        case .queued, .generating, .acting:
+            break
+        }
     }
 
     /// Whitespace-only text is dropped by both destinations, which is what makes

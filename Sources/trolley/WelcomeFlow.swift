@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import TrolleyKit
+import TrolleyMCP
 import TrolleyWidget
 
 /// The app, as opposed to the CLI: a folder pet that stays on screen, with the
@@ -40,14 +41,36 @@ enum WelcomeFlow {
         // open and come forward.
         app.setActivationPolicy(.accessory)
 
+        // The app has always drawn the widget and never owned any tools; the prompt
+        // box was a chat window onto a model that could not touch this Mac, and said
+        // so when asked to. These are the same tools `trolley mcp` serves to Claude
+        // Code -- what changes is only who gets to call them.
+        //
+        // The launcher sleeps rather than pumping the run loop: AppKit owns the main
+        // thread here, and `TrolleyToolRunner` runs the call off it. Pumping a
+        // sourceless background run loop returns immediately and busy-spins.
+        let tools = ToolHost.makeTools(
+            launcher: AppLauncher(sleeper: { Thread.sleep(forTimeInterval: $0) })
+        )
+        let runner = TrolleyToolRunner(
+            tools: tools,
+            // The model's calls land in the same panel list as a server's, so what
+            // trolley is doing reads the same whoever asked for it.
+            observer: ActivityBridge.forwardingObserver,
+            listApps: ToolHost.runningApps
+        )
         let controller = StatusWidgetController(
             permissions: {
                 (SystemTrustChecker().isProcessTrusted(), CGPreflightScreenCaptureAccess())
             },
+            localLLM: LocalLLMSession(toolRunner: runner),
             onQuit: { NSApp.terminate(nil) },
             onOpenSettings: { openSetup() }
         )
         widget = controller
+        // Before anything can be sent: `trolley prompt` fires and returns, so a listener
+        // installed later would miss a prompt typed the moment the app came up.
+        controller.acceptRemotePrompts()
         controller.show()
 
         // The menu bar is the way in for someone who has not been told the folder

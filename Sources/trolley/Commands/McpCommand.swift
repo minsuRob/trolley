@@ -43,7 +43,7 @@ struct McpCommand: ParsableCommand {
             // polling launches.
             log("trolley mcp: ready on stdio")
             MCPServer(
-                provider: makeTools(launcher: AppLauncher()),
+                provider: ToolHost.makeTools(launcher: AppLauncher()),
                 observer: hostRunning ? ActivityBridge.forwardingObserver : ToolCallObserver()
             ).run()
             return
@@ -71,7 +71,7 @@ struct McpCommand: ParsableCommand {
                 Darwin.exit(0)
             }
         )
-        let tools = makeTools(
+        let tools = ToolHost.makeTools(
             launcher: AppLauncher(sleeper: { Thread.sleep(forTimeInterval: $0) }),
             promptQueue: promptQueue
         )
@@ -121,52 +121,4 @@ struct McpCommand: ParsableCommand {
         thread.start()
     }
 
-    private func makeTools(launcher: AppLauncher, promptQueue: PromptQueue? = nil) -> TrolleyTools {
-        TrolleyTools(
-            trustChecker: SystemTrustChecker(),
-            locator: WorkspaceAppLocator(),
-            launcher: launcher,
-            makeKeyPoster: { targetPid in CGKeyboardSynthesizer(targetPid: targetPid) },
-            mousePoster: CGMouseEventPoster(),
-            screenCapturer: SystemScreenCapturer(),
-            makeRoot: { pid, policy in
-                SystemAXElement.application(pid: pid, childrenRetryPolicy: policy)
-            },
-            activateApp: { pid in
-                guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
-                return app.activate()
-            },
-            listRunningApps: {
-                NSWorkspace.shared.runningApplications
-                    .filter { $0.activationPolicy == .regular }
-                    .compactMap { app in
-                        guard let bundleID = app.bundleIdentifier else { return nil }
-                        return AppSummary(
-                            name: app.localizedName ?? bundleID,
-                            bundleID: bundleID,
-                            pid: app.processIdentifier,
-                            isActive: app.isActive
-                        )
-                    }
-            },
-            promptQueue: promptQueue,
-            // Only when a folder has actually been pointed at. `rootPath` always has a
-            // value -- it falls back to a sensible guess -- so the test is whether that
-            // folder is really there, not whether the setting is non-empty.
-            wiki: Self.wikiTools()
-        )
-    }
-
-    private static func wikiTools() -> WikiTools? {
-        // The same switch that governs the widget's digest. "위키 참고: 꺼짐" has to mean
-        // one thing, not "off for my questions but still listed for the agent" -- and a
-        // tool list that changes with a setting the person did not think applied to it
-        // is worse than either behaviour on its own.
-        guard WikiSettings.isEnabled, let root = WikiSettings.rootURL else { return nil }
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory),
-              isDirectory.boolValue
-        else { return nil }
-        return WikiTools()
-    }
 }

@@ -156,6 +156,9 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
     /// Past this the answer scrolls. Chosen so the panel still fits above the
     /// widget in its default bottom-right corner.
     private static let maxAnswerHeight: CGFloat = 150
+    /// Taller than the answer block: the transcript is opened precisely when several
+    /// turns need to be compared at once.
+    private static let maxTranscriptHeight: CGFloat = 200
 
     /// The user committed a prompt. The widget controller owns both the queue
     /// and the model session, and decides which one gets it.
@@ -164,6 +167,11 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
     var onChangeDestination: ((PromptDestination) -> Void)?
     /// "중지" while the model is generating.
     var onCancelGeneration: (() -> Void)?
+    /// ＋ beside the box: drop the thread and start clean.
+    var onNewConversation: (() -> Void)?
+    /// The transcript toggle asked for the current thread. Answers with condensed
+    /// lines, or an error to print in place of them.
+    var onLoadTranscript: ((@escaping (Result<[TranscriptRendering.Line], Error>) -> Void) -> Void)?
     /// Opens the setup window. Nil in a host that has none to offer -- a server
     /// drawing its own widget -- and the gear is then not shown at all rather
     /// than shown dead.
@@ -193,6 +201,14 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
     private let pendingCountLabel = ActivityPanelController.makeLabel(Style.caption, .secondaryLabelColor)
     private let pendingStack = NSStackView()
     private let promptField = PromptTextField()
+    private let newConversationButton = PanelButton()
+    private let transcriptButton = PanelButton()
+    private let transcriptScroll = NSScrollView()
+    private let transcriptStack = NSStackView()
+    private var transcriptHeight: NSLayoutConstraint!
+    /// Closed until asked for. Kept here rather than read off `isHidden` so a refresh
+    /// that runs while the fetch is in flight does not collapse it.
+    private var isTranscriptOpen = false
     private let destinationControl = NSSegmentedControl()
     private let hintLabel = ActivityPanelController.makeLabel(Style.caption, .tertiaryLabelColor)
     private let answerSeparator = ActivityPanelController.makeSeparator()
@@ -455,8 +471,38 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         // Committing only on ⏎ -- clicking away from a half-typed prompt must
         // not send it.
         promptField.cell?.sendsActionOnEndEditing = false
-        stack.addArrangedSubview(promptField)
-        promptField.widthAnchor.constraint(equalToConstant: Self.contentWidth).isActive = true
+        // The box no longer spans the panel: the two things someone reaches for while
+        // looking at an answer -- start over, see the whole thread -- belong next to it,
+        // not buried in the setup window.
+        Self.configureIconButton(
+            newConversationButton, symbol: "plus.bubble", fallback: "＋",
+            tooltip: "새 대화 — 지금까지의 맥락을 버리고 새로 시작합니다"
+        )
+        newConversationButton.target = self
+        newConversationButton.action = #selector(newConversationClicked)
+
+        Self.configureIconButton(
+            transcriptButton, symbol: "text.bubble", fallback: "⋯",
+            tooltip: "전체 대화 보기"
+        )
+        transcriptButton.target = self
+        transcriptButton.action = #selector(toggleTranscript)
+
+        let promptRow = NSStackView(views: [
+            promptField, newConversationButton, transcriptButton
+        ])
+        promptRow.orientation = .horizontal
+        promptRow.alignment = .centerY
+        promptRow.spacing = 4
+        stack.addArrangedSubview(promptRow)
+        promptRow.widthAnchor.constraint(equalToConstant: Self.contentWidth).isActive = true
+        // Only the field absorbs the leftover width; the buttons keep their size.
+        for button in [newConversationButton, transcriptButton] {
+            button.setContentHuggingPriority(.required, for: .horizontal)
+            button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        }
+
+        buildTranscriptBlock()
 
         hintLabel.lineBreakMode = .byWordWrapping
         hintLabel.preferredMaxLayoutWidth = Self.contentWidth
@@ -513,6 +559,141 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         stack.addArrangedSubview(headerRow(llmStatusLabel, stopButton, alignment: .centerY))
     }
 
+    /// A square borderless icon button, sized to sit flush with the prompt field.
+    ///
+    /// SF Symbols with a text fallback: the symbols used here have shipped since
+    /// Big Sur, but a missing glyph would render as an empty square with a working
+    /// click target, which is worse than a plain character.
+    private static func configureIconButton(
+        _ button: NSButton, symbol: String, fallback: String, tooltip: String
+    ) {
+        if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip) {
+            button.image = image
+            button.imagePosition = .imageOnly
+        } else {
+            button.title = fallback
+            button.font = Style.body
+        }
+        button.isBordered = false
+        button.bezelStyle = .inline
+        button.contentTintColor = .secondaryLabelColor
+        button.toolTip = tooltip
+        button.widthAnchor.constraint(equalToConstant: 22).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 22).isActive = true
+    }
+
+    /// The whole thread, collapsed to one line per message and closed by default.
+    ///
+    /// Closed by default because the panel's job is the exchange in front of you; the
+    /// transcript is for the moment you suspect the model is answering a question you
+    /// asked five minutes ago, which is exactly when one line per message is enough to
+    /// see it.
+    private func buildTranscriptBlock() {
+        transcriptStack.orientation = .vertical
+        transcriptStack.alignment = .leading
+        transcriptStack.spacing = 3
+        transcriptStack.translatesAutoresizingMaskIntoConstraints = false
+
+        // The stack is the document view directly. Wrapping it in a plain `NSView` first
+        // is the obvious thing and it renders nothing: that view keeps
+        // `translatesAutoresizingMaskIntoConstraints`, so its own zero frame becomes a
+        // set of constraints that fight the ones pinning the stack inside it, and the
+        // whole block collapses. Measured -- the AX tree showed the scroll area present
+        // and every row missing.
+        transcriptStack.widthAnchor.constraint(equalToConstant: Self.contentWidth).isActive = true
+        transcriptScroll.documentView = transcriptStack
+        transcriptScroll.drawsBackground = false
+        transcriptScroll.borderType = .noBorder
+        transcriptScroll.hasVerticalScroller = true
+        transcriptScroll.autohidesScrollers = true
+        transcriptScroll.translatesAutoresizingMaskIntoConstraints = false
+        // Zero rather than hidden: an `NSStackView` detaches a hidden arranged subview,
+        // and re-attaching it on every toggle re-runs the whole panel's layout.
+        transcriptHeight = transcriptScroll.heightAnchor.constraint(equalToConstant: 0)
+        NSLayoutConstraint.activate([
+            transcriptScroll.widthAnchor.constraint(equalToConstant: Self.contentWidth),
+            transcriptHeight
+        ])
+        stack.addArrangedSubview(transcriptScroll)
+    }
+
+    @objc private func newConversationClicked() {
+        // Closed as well: what it is showing is the thread that was just abandoned.
+        setTranscript(open: false)
+        onNewConversation?()
+    }
+
+    @objc private func toggleTranscript() {
+        setTranscript(open: !isTranscriptOpen)
+        guard isTranscriptOpen else { return }
+        showTranscript(rows: [transcriptRow(.init(kind: .scaffolding, text: "불러오는 중…"))])
+        onLoadTranscript? { [weak self] result in
+            guard let self, self.isTranscriptOpen else { return }
+            switch result {
+            case .success(let lines) where lines.isEmpty:
+                self.showTranscript(rows: [
+                    self.transcriptRow(.init(kind: .scaffolding, text: "아직 주고받은 말이 없습니다"))
+                ])
+            case .success(let lines):
+                self.showTranscript(rows: lines.map(self.transcriptRow))
+            case .failure(let error):
+                self.showTranscript(rows: [
+                    self.transcriptRow(.init(kind: .scaffolding, text: error.localizedDescription))
+                ])
+            }
+        }
+    }
+
+    private func setTranscript(open: Bool) {
+        isTranscriptOpen = open
+        transcriptHeight.constant = open ? Self.maxTranscriptHeight : 0
+        transcriptButton.contentTintColor = open ? .controlAccentColor : .secondaryLabelColor
+        // The label says what pressing it will do next, which is also the only state this
+        // button has that survives into the AX tree -- a panel's scroll views do not.
+        let title = open ? "전체 대화 닫기" : "전체 대화 보기"
+        transcriptButton.toolTip = title
+        transcriptButton.setAccessibilityLabel(title)
+        if !open { replaceRows(of: transcriptStack, with: []) }
+        resizeToFit()
+    }
+
+    private func showTranscript(rows: [NSView]) {
+        replaceRows(of: transcriptStack, with: rows)
+        resizeToFit()
+        // Newest at the bottom, which is where the eye goes and where the question that
+        // is bothering you actually is.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.transcriptScroll.documentView?.scroll(
+                NSPoint(x: 0, y: max(0, (self.transcriptScroll.documentView?.frame.height ?? 0)
+                    - self.transcriptScroll.contentSize.height))
+            )
+        }
+    }
+
+    private func transcriptRow(_ line: TranscriptRendering.Line) -> NSView {
+        let label: NSTextField
+        switch line.kind {
+        case .question:
+            label = Self.makeLabel(Style.body, .labelColor)
+            label.stringValue = "묻기: \(line.text)"
+        case .answer:
+            label = Self.makeLabel(Style.body, .secondaryLabelColor)
+            label.stringValue = line.text
+        case .tool:
+            label = Self.makeLabel(Style.mono, .tertiaryLabelColor)
+            label.stringValue = line.text
+        case .scaffolding:
+            label = Self.makeLabel(Style.caption, .tertiaryLabelColor)
+            label.stringValue = line.text
+        }
+        label.lineBreakMode = .byWordWrapping
+        label.maximumNumberOfLines = 3
+        label.preferredMaxLayoutWidth = Self.contentWidth
+        label.widthAnchor.constraint(equalToConstant: Self.contentWidth).isActive = true
+        return label
+    }
+
     private func permissionPair(_ dot: NSTextField, _ name: NSTextField) -> NSStackView {
         dot.stringValue = "●"
         let pair = NSStackView(views: [dot, name])
@@ -563,6 +744,20 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
 
         updatePromptSection(model)
 
+        resizeToFit()
+    }
+
+    /// Grows the panel to whatever the stack now needs.
+    ///
+    /// Split out of `refresh` because it was trapped there, and that was the whole bug
+    /// behind a transcript that would not appear: the toggle set its height constraint
+    /// and nothing resized the window, so the block laid out correctly at full height
+    /// *outside* the panel's content rect and was clipped away. Every symptom pointed at
+    /// the button not firing -- it was firing the entire time.
+    ///
+    /// Anything that changes the stack's height outside a model refresh has to call this.
+    private func resizeToFit() {
+        stack.layoutSubtreeIfNeeded()
         panel.setContentSize(NSSize(width: Self.width, height: stack.fittingSize.height))
     }
 

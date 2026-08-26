@@ -132,6 +132,50 @@ public final class LocalLLMClient {
         }
     }
 
+    /// One stored message, for the full-transcript view.
+    ///
+    /// The panel keeps only the latest exchange -- deliberately, it is 360pt wide -- so
+    /// the whole thread has to be read back from the server when someone asks to see it.
+    public struct Message: Equatable {
+        public let role: String
+        public let content: String
+
+        public init(role: String, content: String) {
+            self.role = role
+            self.content = content
+        }
+    }
+
+    /// Reads a conversation's messages. Empty for an id the server has forgotten, which
+    /// is not an error: a cleared database and an empty new thread look the same here
+    /// and both mean "nothing to show yet".
+    public func messages(
+        conversationID: String,
+        completion: @escaping (Result<[Message], Failure>) -> Void
+    ) {
+        Task {
+            do {
+                let request = try makeRequest(
+                    path: "/api/conversations/\(conversationID)/messages", method: "GET"
+                )
+                let (data, response) = try await self.data(for: request)
+                try check(response, body: String(decoding: data, as: UTF8.self))
+                let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] ?? []
+                let messages = rows.compactMap { row -> Message? in
+                    guard let role = row["role"] as? String,
+                          let content = row["content"] as? String
+                    else { return nil }
+                    return Message(role: role, content: content)
+                }
+                await MainActor.run { completion(.success(messages)) }
+            } catch let failure as Failure {
+                await MainActor.run { completion(.failure(failure)) }
+            } catch {
+                await MainActor.run { completion(.failure(.unreachable(error.localizedDescription))) }
+            }
+        }
+    }
+
     // MARK: - Asking
 
     /// Sends `prompt` and streams the answer back.
