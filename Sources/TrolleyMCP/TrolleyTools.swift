@@ -43,6 +43,11 @@ public final class TrolleyTools: ToolProviding {
     /// prompt box, so a headless server has nothing to hand out and does not
     /// advertise `take_prompt` at all.
     private let promptQueue: PromptQueue?
+    /// Present only when a wiki folder is configured. Nil keeps `wiki_search` and
+    /// `wiki_read` off the tool list entirely -- the same treatment `take_prompt`
+    /// gets, because a listed tool that cannot work costs the model a call to find
+    /// that out.
+    private let wiki: WikiTools?
     private let executablePath: () -> String
     private let sleeper: (TimeInterval) -> Void
     private let now: () -> Date
@@ -79,6 +84,7 @@ public final class TrolleyTools: ToolProviding {
         clipboard: ClipboardAccessing = NSPasteboardClipboard(),
         inputSource: InputSourceControlling = TISInputSourceController(),
         promptQueue: PromptQueue? = nil,
+        wiki: WikiTools? = nil,
         executablePath: @escaping () -> String = { AccessibilityPermission.currentExecutablePath() },
         sleeper: @escaping (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
         now: @escaping () -> Date = { Date() }
@@ -95,6 +101,7 @@ public final class TrolleyTools: ToolProviding {
         self.clipboard = clipboard
         self.inputSource = inputSource
         self.promptQueue = promptQueue
+        self.wiki = wiki
         self.executablePath = executablePath
         self.sleeper = sleeper
         self.now = now
@@ -295,6 +302,9 @@ public final class TrolleyTools: ToolProviding {
                 ], required: ["x", "y"])
             )
         ]
+        if wiki != nil {
+            definitions.append(contentsOf: WikiTools.definitions)
+        }
         if promptQueue != nil {
             definitions.append(
                 ToolDefinition(
@@ -324,6 +334,15 @@ public final class TrolleyTools: ToolProviding {
     /// server interrupt, so the note rides out on the next result the agent is
     /// already going to read. Errors take the same path via `MCPServer`'s error
     /// payload, which this never sees -- a prompt waits for the next success.
+    /// Reachable only if a client calls a name that was never advertised, which
+    /// is the one case where the conditional registration above is not enough.
+    private func requireWiki() throws -> WikiTools {
+        guard let wiki else {
+            throw ToolError.wikiUnavailable("No wiki folder is configured.")
+        }
+        return wiki
+    }
+
     private func annotatingPendingPrompts(after name: String, _ result: JSONValue) -> JSONValue {
         guard name != "take_prompt",
               let waiting = promptQueue?.pendingCount, waiting > 0,
@@ -353,6 +372,8 @@ public final class TrolleyTools: ToolProviding {
         case "screenshot": return try screenshot(args)
         case "click_at": return try clickAt(args)
         case "move_mouse": return try moveMouse(args)
+        case "wiki_search": return try requireWiki().search(args)
+        case "wiki_read": return try requireWiki().read(args)
         case "take_prompt": return try takePrompt()
         default:
             throw ToolError(.invalidArgument, "Unknown tool \"\(name)\".")

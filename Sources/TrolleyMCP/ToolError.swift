@@ -19,6 +19,8 @@ public struct ToolError: Error, Equatable {
         case actionFailed = "ACTION_FAILED"
         case timeout = "TIMEOUT"
         case invalidArgument = "INVALID_ARGUMENT"
+        case wikiPageNotFound = "WIKI_PAGE_NOT_FOUND"
+        case wikiUnavailable = "WIKI_UNAVAILABLE"
     }
 
     public let code: Code
@@ -51,6 +53,29 @@ public extension ToolError {
             hint: "Grant Accessibility to this exact binary: \(executablePath). "
                 + "System Settings > Privacy & Security > Accessibility. Trust is per executable path, "
                 + "and is granted to trolley itself -- not to the MCP client that launched it."
+        )
+    }
+
+    /// The name a model asked for is not in the index.
+    ///
+    /// Deliberately shaped like `elementNotFound`: the answer is never to guess a path
+    /// but to list first and use a name from the list. Nothing here joins a
+    /// model-supplied string onto a filesystem path, so a name that misses simply
+    /// misses -- it cannot reach out of the wiki.
+    static func wikiPageNotFound(_ title: String) -> ToolError {
+        ToolError(
+            .wikiPageNotFound,
+            "No wiki page is named \"\(title)\".",
+            hint: "Titles are the page's filename without .md, exactly as wiki_search returns them "
+                + "inside [[...]]. Call wiki_search first and pass a title from its output."
+        )
+    }
+
+    static func wikiUnavailable(_ reason: String) -> ToolError {
+        ToolError(
+            .wikiUnavailable,
+            reason,
+            hint: "The wiki folder is set in trolley's setup window, or with `trolley wiki --root PATH --save`."
         )
     }
 
