@@ -70,26 +70,44 @@ trolley 는 SwiftPM 으로 만든 macOS 메뉴 막대 앱이다. 로컬 LLM(Diff
 
 ## 확인된 사실 (직접 측정된 것들)
 
-**1. 지금 피드는 죽어 있다.** `https://api.github.com/repos/minsuRob/trolley/releases/latest`
-→ **HTTP 404**. 저장소는 공개(200)인데 릴리스도 태그도 0개고(`git tag` → 0줄),
-`build-installer.sh` 에 업로드 단계가 없다. `trolley update` 는 한 번도 성공한 적이 없다.
+**1. 피드는 죽어 있었고, 이제 살아 있다.** 이전 판은
+`https://api.github.com/repos/minsuRob/trolley/releases/latest` 가 404 이고
+`trolley update` 는 한 번도 성공한 적이 없다고 적었다. 둘 다 맞았다. **지금은 아니다.**
 
-직접 돌려 본 결과다. 세 번 연달아, 매번 같다:
+`v0.2.0` 을 실제로 올려 전 경로를 돌렸다. 처음으로 성공했다:
 
 ```
-$ swift build && ./.build/debug/trolley update --check
-설치 위치: .../.build/arm64-apple-macosx/debug/trolley
+$ trolley.app/Contents/MacOS/trolley update --check
 현재 버전: 0.1.0
-Error: 공개된 릴리스가 아직 없습니다.
-$ echo $?
-1
+새 버전 있음: 0.2.0                       (종료코드 0)
+
+$ trolley.app/Contents/MacOS/trolley update
+업데이트 완료: 0.1.0 → 0.2.0             (종료코드 0)
 ```
 
-**여기서 만들 것 6 의 근거가 나온다.** "릴리스 없음" 이 지금은 `Error:` 에 종료코드 1 로
-나온다 — 요구하는 "차분한 정상 상태"의 정반대다. 고친 뒤 이 명령이 종료코드 0 으로
-차분하게 끝나는지가 그대로 확인 방법이 된다.
+**"손대지 말 것" 세 줄이 이제 추측이 아니라 측정이다.** 그 셋은 여태 한 번도 안
+돌아봤었다:
 
-(레이아웃 판별은 잘 돈다: `.build/.../debug/trolley` 를 `bareBinary` 로 맞게 집었다.)
+| 검증한 것 | 결과 |
+|---|---|
+| `extract`(ditto) 가 서명을 보존하나 | 교체 후에도 팀 핀 `codesign -R` 통과 |
+| `replace`(RENAME_SWAP) 가 실제로 바꾸나 | inode 851559480 → 851559954, 버전 0.1.0 → 0.2.0 |
+| 실패 시 찌꺼기가 남나 | 설치 디렉터리에 임시 파일 0개 |
+| 두 번 돌리면 | "최신입니다", 종료코드 0 — 멱등 |
+| 변조된 번들을 막나 | `a sealed resource is missing or invalid` 로 **거부** |
+
+마지막 줄이 중요하다. 번들 안 파일 하나를 고친 뒤 같은 요구사항으로 검증하니 거부됐다.
+`verifySignature` 는 장식이 아니라 실제로 막는다.
+
+**여전히 만들 것 6 의 근거는 유효하다.** "릴리스 없음" 은 지금도 `Error:` 에 종료코드
+1 로 나온다 — 요구하는 "차분한 정상 상태"의 정반대다. 위 두 명령이 0 을 돌려주는 것과
+대비된다. 고친 뒤 그 경우도 0 으로 끝나는지가 확인 방법이다.
+
+**GitHub 함정 하나 (측정됨).** `/releases/latest` 는 **prerelease 를 무시한다.**
+prerelease 만 올려 두면 API 는 404 를 돌려주고, 그건 "릴리스가 아예 없음" 과 구별되지
+않는다. 처음에 prerelease 로 올렸다가 이것 때문에 막혔다 — 정식 릴리스로 바꾸자
+즉시 잡혔다. maki.ink 로 옮기면 이 함정은 사라지지만, 그 대신 사실 3 의 SPA 셸이
+그 자리를 대신한다. **"없음" 을 뜻하는 응답이 호스트마다 다르다는 것이 요점이다.**
 
 **2. 배포 위치는 MAKi 인프라를 재사용한다.** 같은 사용자의 다른 제품이 이미 라이브 피드를
 돌린다. 규약 참고용으로 읽어라 (읽기만):
@@ -135,7 +153,10 @@ $ curl -sIL https://maki.ink/updates/trolley/mac/latest/manifest.json
 **6. 지금 테스트는 정확히 405개다** (`grep -rho '^\s*func test[A-Za-z0-9_]*' Tests | wc -l`).
 이건 하한이 아니라 오늘의 값이다. 아래 A1 을 보라.
 
-**7. `dist/` 는 지금 없다.** 배포할 zip 자체가 아직 존재하지 않는다.
+**7. `dist/` 에 아티팩트가 있다.** `Scripts/build-installer.sh --skip-notarize` 로
+`dist/trolley-app.zip`(2,898,569바이트, sha256 `8684b53e…`)과 `dist/trolley-0.2.0.dmg`
+가 만들어져 있다. **공증은 없다** — 서명은 팀 `46LU76SNUA` 로 되어 있어 `verifySignature`
+는 통과하지만 다른 맥에서는 Gatekeeper 가 막는다. 실배포용으로 쓰지 마라.
 
 ---
 
@@ -220,15 +241,16 @@ SPA 셸 감지 → .noRelease → UpdateStatus.upToDate("아직 배포된 릴리
   판단하라: `TrolleyCommit` 이 `-dirty` 로 끝나거나 HEAD 와 다르면 거부.
   `CFBundleShortVersionString` 이 `Version.swift`·태그와 셋 다 일치하는지도 본다
 - HEAD 에 `v$TrolleyVersion.current` 태그가 없으면 거부한다. **태그를 스크립트가 만들지 마라**
-  — 릴리스 판단은 사람 몫이다. 태그가 0개이므로 첫 실행은 반드시 실패한다.
-  그 실패 메시지가 쓸모 있게 하라. 예:
+  — 릴리스 판단은 사람 몫이다. 지금은 `v0.2.0` 이 있고 `current` 도 `0.2.0` 이라
+  이 검사는 통과한다. 다음 버전에서 다시 0개가 되므로, 그 실패 메시지가 쓸모 있게
+  하라. 예:
 
   ```
-  error: HEAD 에 v0.1.0 태그가 없습니다.
-         릴리스로 확정하려면:  git tag -a v0.1.0 -m "trolley 0.1.0"
+  error: HEAD 에 v0.3.0 태그가 없습니다.
+         릴리스로 확정하려면:  git tag -a v0.3.0 -m "trolley 0.3.0"
          그다음 다시:          Scripts/publish-release.sh --yes
   ```
-- `Version.swift` 의 `0.1.0` 을 올리지 마라
+- `Version.swift` 의 버전을 스크립트가 올리지 마라 (현재 `0.2.0`)
 
 ### 3. 앱 안의 주기적 확인
 
@@ -309,24 +331,34 @@ SPA 셸이다 — 위 B2 를 보라.
 
 ---
 
-## 검증 — 이대로 하면 한 번도 안 돌려 보고 커밋하게 된다
+## 검증 — 절반은 이미 끝났다
 
-**A7.** `Version.swift` 의 `0.1.0` 을 올리지 말라 + HEAD 에 `v$current` 태그 필수
-= 첫 릴리스 버전이 곧 현재 버전. `UpdateDecision.decide` 는 `current < latest` 일 때만
-`.available` 이므로 **항상 `.upToDate` 다.** "새 버전 발견 → 다운로드 → 설치" 경로가
-한 번도 안 돈다.
+**A7 은 해소됐다.** 이전 판은 `0.1.0` 을 올리지 말라는 지시와 `v$current` 태그 필수가
+겹쳐 `decide` 가 영원히 `.upToDate` 라, 전 경로를 한 번도 못 돌려 보고 커밋하게 된다고
+적었다. 맞는 지적이었고, 그래서 사람이 버전을 올려 `v0.2.0` 을 실제로 냈다.
+그 결과가 사실 1 의 표다 — `extract` / `verifySignature` / `replace` 는 이제 검증됐다.
 
-그래서 리허설 시임을 만든다:
+**남은 것은 당신이 새로 만드는 절반이다.** 아래는 아직 아무도 안 돌려 봤다:
+
+- 매니페스트 파싱 (`ReleaseManifest`)
+- sha256 검증, 특히 **불일치 시 교체가 안 되는지**
+- SPA 셸 → `.noRelease` → 차분한 정상 상태 (지금은 `Error:` + 종료코드 1)
+- stage / commit 분리, 스테이징 파일의 수명
+- 6시간 타이머, 메뉴 항목 활성/비활성, 재실행
+
+그래서 리허설 시임은 여전히 필요하다:
 
 - `TrolleyVersion.releaseFeed` 를 `TROLLEY_RELEASE_FEED` 환경변수로 덮을 수 있게 하라
   (없으면 maki.ink 기본값). 개발용 시임이라는 걸 주석에 적어라
-- 로컬 디렉터리에 `0.2.0` 매니페스트 + **진짜 서명된** zip 을 세우고
-  `python3 -m http.server` 로 띄운 뒤 전 경로를 돌린다. 서명이 진짜여야
-  `verifySignature` 까지 통과한다
+- 로컬 디렉터리에 매니페스트 + **진짜 서명된** zip 을 세우고 `python3 -m http.server`
+  로 띄운 뒤 돌린다. 서명이 진짜여야 `verifySignature` 까지 간다.
+  `dist/trolley-app.zip` 이 그 진짜 zip 이다 (사실 7)
 - **`maki.ink` 라이브 오리진은 리허설에 쓰지 마라** (사실 4)
 
-돌려 봐야 하는 것: 매니페스트 없음(SPA 셸) → 차분한 정상 상태 / 새 버전 발견 → 다운로드 →
-메뉴 항목 활성화 → 설치 → 재실행 / sha256 불일치 → 교체 안 됨 / 서명 불일치 → 교체 안 됨.
+**검증 방법은 이미 증명된 것을 그대로 쓰면 된다.** 사실 1 에서 쓴 것들이다:
+`stat -f %i` 로 inode 가 바뀌었는지, 교체 후 `codesign -R` 로 팀 핀이 여전히 통과하는지,
+설치 디렉터리에 임시 파일이 남았는지, 두 번 돌렸을 때 멱등인지, 번들 안 파일을 하나
+고쳐 놓고 거부되는지.
 
 ---
 
