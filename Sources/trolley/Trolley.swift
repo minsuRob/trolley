@@ -23,6 +23,8 @@ struct Trolley: ParsableCommand {
         subcommands: [
             CheckPermissionsCommand.self,
             McpCommand.self,
+            AskCommand.self,
+            WikiCommand.self,
             UpdateCommand.self,
             DumpTreeCommand.self,
             RunCommand.self,
