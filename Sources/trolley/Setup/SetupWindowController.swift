@@ -70,7 +70,14 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     private var executablePath: String { AccessibilityPermission.currentExecutablePath() }
     private var bundlePath: String { Bundle.main.bundleURL.path }
 
-    override init() {
+    /// What "가동 시간" counts from. Handed in rather than taken here, because this
+    /// window is built the first time somebody opens it: on a Mac where everything
+    /// is already granted that is often hours after launch, and a window that timed
+    /// itself would report minutes for an app that had been up all morning.
+    private let launchedAt: Date
+
+    init(launchedAt: Date = Date()) {
+        self.launchedAt = launchedAt
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 460, height: 420),
             styleMask: [.titled, .closable],
@@ -373,6 +380,7 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         }
         return SetupCopy.details(
             version: TrolleyVersion.display,
+            uptime: SetupCopy.uptime(Date().timeIntervalSince(launchedAt)),
             path: executablePath,
             model: model,
             address: LocalLLMSettings.baseURLString,

@@ -120,18 +120,37 @@ enum SetupCopy {
 
     /// The technical table. Jargon is correct here -- this is what you paste into a
     /// bug report.
+    ///
+    /// - Parameter uptime: already formatted by `uptime(_:)`. This row used to sit in
+    ///   the panel's header, ticking beside the title. It reads as a fact about this
+    ///   run rather than something to watch, and next to 버전 it is one more line of
+    ///   the same paste -- "떠 있은 지 얼마나 됐나" is exactly a bug-report question.
     static func details(
         version: String,
+        uptime: String,
         path: String,
         model: String?,
         address: String
     ) -> [(label: String, value: String)] {
         [
             ("버전", version),
+            ("가동 시간", uptime),
             ("프로그램 경로", path),
             ("모델", model ?? "확인 중…"),
             ("서버 주소", address)
         ]
+    }
+
+    /// How long this run has been up, as `분:초` -- or `시:분:초` once there are hours.
+    ///
+    /// Hours only once there are any: "00:14:02" reads as a stopwatch, and a session
+    /// that old is the exception.
+    static func uptime(_ interval: TimeInterval) -> String {
+        let total = max(0, Int(interval))
+        let (hours, minutes, seconds) = (total / 3600, (total % 3600) / 60, total % 60)
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, minutes, seconds)
+            : String(format: "%02d:%02d", minutes, seconds)
     }
 
     static func diagnostics(_ rows: [(label: String, value: String)]) -> String {

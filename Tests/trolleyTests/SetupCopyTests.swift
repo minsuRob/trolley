@@ -92,18 +92,43 @@ final class SetupCopyTests: XCTestCase {
 
     func testDetailsCarriesTheTechnicalFacts() {
         let rows = SetupCopy.details(
-            version: "0.1.0", path: "/Applications/trolley.app/Contents/MacOS/trolley",
+            version: "0.1.0", uptime: "14:02",
+            path: "/Applications/trolley.app/Contents/MacOS/trolley",
             model: "diffusiongemma-26B", address: "https://example.ts.net:8443"
         )
-        XCTAssertEqual(rows.map(\.label), ["버전", "프로그램 경로", "모델", "서버 주소"])
+        XCTAssertEqual(
+            rows.map(\.label), ["버전", "가동 시간", "프로그램 경로", "모델", "서버 주소"]
+        )
         XCTAssertEqual(rows.last?.value, "https://example.ts.net:8443")
+    }
+
+    /// It left the panel header for this table, so a paste has to carry it.
+    func testDiagnosticsPasteCarriesUptime() {
+        let text = SetupCopy.diagnostics(
+            SetupCopy.details(
+                version: "0.1.0", uptime: "14:02", path: "/x", model: nil, address: "https://x"
+            )
+        )
+        XCTAssertTrue(text.contains("가동 시간: 14:02"))
     }
 
     func testDetailsSaysCheckingRatherThanGuessingWhenUnknown() {
         let rows = SetupCopy.details(
-            version: "0.1.0", path: "/x", model: nil, address: "https://x"
+            version: "0.1.0", uptime: "00:00", path: "/x", model: nil, address: "https://x"
         )
         XCTAssertEqual(rows.first(where: { $0.label == "모델" })?.value, "확인 중…")
+    }
+
+    func testUptimeIsMinutesAndSecondsUntilTheFirstHour() {
+        XCTAssertEqual(SetupCopy.uptime(0), "00:00")
+        XCTAssertEqual(SetupCopy.uptime(842), "14:02")
+        XCTAssertEqual(SetupCopy.uptime(3599), "59:59")
+    }
+
+    /// The old format was minutes-only, so a two-hour session read as "120:00".
+    func testUptimeGrowsAnHoursFieldRatherThanCountingPastSixty() {
+        XCTAssertEqual(SetupCopy.uptime(3600), "1:00:00")
+        XCTAssertEqual(SetupCopy.uptime(7442), "2:04:02")
     }
 
     func testDiagnosticsIsOneLinePerFact() {
