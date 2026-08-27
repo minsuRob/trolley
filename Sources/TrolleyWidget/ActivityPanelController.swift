@@ -715,7 +715,7 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         button.font = Style.body
         button.contentTintColor = .labelColor
         button.alignment = .left
-        button.title = page.basename
+        button.title = "• " + page.basename
         button.toolTip = page.basename
         button.tag = index
         button.target = self
