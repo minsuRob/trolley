@@ -41,6 +41,8 @@ public enum WikiSettings {
     public static let windowAssigneeKey = "trolley.wiki.window.assignee"
     public static let windowFolderKey = "trolley.wiki.window.folder"
     public static let windowStatusKey = "trolley.wiki.window.status"
+    /// Where the wiki window's divider was left, in points of list width.
+    public static let windowListWidthKey = "trolley.wiki.window.listWidth"
 
     /// Written by builds that gated the wiki behind a switch. Named only so an upgrade
     /// can clear them: an old bundle put back by `trolley update` would read `enabled`
@@ -176,6 +178,29 @@ public enum WikiSettings {
     public static var windowStatus: String? {
         get { defaults.string(forKey: windowStatusKey) }
         set { setOptional(newValue, forKey: windowStatusKey) }
+    }
+
+    /// How wide the list was left, or nil for "never dragged".
+    ///
+    /// Nil rather than 0 because the window has to tell a person who dragged the divider
+    /// to the far left apart from one who has never touched it, and `double(forKey:)`
+    /// answers 0 to both. A stored width outside anything a window could hold is dropped
+    /// on the way out rather than clamped: the window's own width decides that, and it
+    /// is not known here.
+    public static var windowListWidth: Double? {
+        get {
+            guard let stored = defaults.object(forKey: windowListWidthKey) as? Double,
+                  stored.isFinite, stored > 0
+            else { return nil }
+            return stored
+        }
+        set {
+            if let newValue, newValue.isFinite, newValue > 0 {
+                defaults.set(newValue, forKey: windowListWidthKey)
+            } else {
+                defaults.removeObject(forKey: windowListWidthKey)
+            }
+        }
     }
 
     /// Removes rather than stores nil, so "never chosen" stays distinguishable from a
