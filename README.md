@@ -168,6 +168,31 @@ trolley update --check   # 확인만
 접근성 권한은 **trolley 실행 파일 자체**에 부여된다. Claude Code의 자식 프로세스로 실행돼도
 부모의 권한과는 무관하다.
 
+### 고친 것을 띄워서 확인하기 (개발자용)
+
+```sh
+Scripts/dev-run.sh            # swift build → .build/dev/trolley.app → open -n
+Scripts/dev-run.sh --replace  # 이미 떠 있는 설치본을 먼저 종료
+Scripts/dev-run.sh --release  # 릴리스 빌드로
+```
+
+`swift run trolley` 로는 창이 뜨지 않는다. `WelcomeFlow.shouldRun()` 이 "launchd 가 **이 번들의**
+identifier 로 띄웠을 것"을 조건으로 잡고 있고, 맨 바이너리에는 identifier 가 없어서 언제나
+false 다. 터미널이 자기 `__CFBundleIdentifier` 를 모든 셸에 물려주기 때문에 이 조건을 느슨하게
+둘 수 없다 — 그러면 `trolley` 만 쳐도 창이 열린다.
+
+그래서 최소 단위가 **Info.plist 를 씌운 번들**이고, 이 스크립트는 딱 거기까지만 한다. 서명도
+공증도 dmg 도 없다: 로컬에서 방금 만든 앱은 Gatekeeper 를 거치지 않는다. 확인하겠다고
+`build-installer.sh` 를 돌리거나 `/Applications/trolley.app` 을 덮어쓸 이유가 없다.
+
+번들 identifier 는 설치본과 **일부러 같게** 둔다. UserDefaults 도메인이 identifier 로 갈리기
+때문이다 — 다른 값을 붙이면 미리보기가 읽는 설정이 실제 앱의 설정이 아니라 빈 도메인이 되고,
+그러면 화면이 무엇을 보여주는지 알 수 없다. 대신 창 제목의 커밋이 `dev-` 로 시작하는 쪽이 방금
+빌드한 것이다. 설치본과 나란히 떠도 되고, dev 쪽만 끄려면 `pkill -f '.build/dev/trolley.app'`.
+
+준비 항목 세 줄(프로그램 위치·손쉬운 사용·화면 기록)이 주황인 것은 정상이다. 권한은 실행 파일
+경로에 묶이는데 dev 번들은 `/Applications` 가 아닌 `.build/dev` 에서 도는 별개 바이너리다.
+
 ### 설치파일 만들기 (개발자용)
 
 ```sh
