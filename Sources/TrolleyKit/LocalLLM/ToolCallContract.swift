@@ -91,11 +91,22 @@ public enum ToolCallContract {
         // that. Saying which questions are *not* screen questions has to come first, and
         // has to say so in as many words.
         if tools.contains(where: { $0.name == "wiki_read" }) {
+            // Now says how to *find* a page, not only how to read one.
+            //
+            // The old wording ("목록에 제목만 있으면") assumed a list of titles was already in
+            // front of the model, and under `WikiSettings.Mode.auto` none ever is: that
+            // mode's whole premise is that the model picks the filter after hearing the
+            // question. Which axis to reach for is therefore part of the contract now,
+            // named by example, because a model told only that `wiki_search` exists has
+            // no reason to prefer `assignee` over guessing a title.
             text += """
 
 
                 위키(llmwiki) 질문은 화면을 조작해서 풀지 않는다. 앱을 켜거나 화면을 보지 않는다.
-                목록에 제목만 있으면 wiki_read 에 그 제목을 그대로 넣어 본문을 읽는다.
+                먼저 wiki_search 로 문서를 찾는다. 질문에 맞는 조건만 골라 넣는다 —
+                이름이 나오면 titleContains, 사람이면 assignee, "진행중"·"완료" 같은 말이면 status,
+                web·mobile 같은 말이면 area. 무엇을 찾을지 모르겠으면 조건 없이 그냥 부른다.
+                그렇게 나온 제목을 wiki_read 에 그대로 넣어 본문을 읽는다.
                 한 번에 한 건씩, 정말 필요한 것만 읽는다. 읽지 않은 문서의 내용은 말하지 않는다.
                 """
         }

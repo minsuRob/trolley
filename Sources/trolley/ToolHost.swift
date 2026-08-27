@@ -53,11 +53,14 @@ enum ToolHost {
     }
 
     private static func wikiTools() -> WikiTools? {
-        // The same switch that governs the widget's digest. "위키 참고: 꺼짐" has to mean
-        // one thing, not "off for my questions but still listed for the agent" -- and a
-        // tool list that changes with a setting the person did not think applied to it
-        // is worse than either behaviour on its own.
-        guard WikiSettings.isEnabled, let root = WikiSettings.rootURL else { return nil }
+        // 끔 means gone from here too, not merely "off for my questions but still listed
+        // for the agent": a tool list that changes with a setting the person did not
+        // think applied to it is worse than either behaviour on its own.
+        //
+        // 자동 and 직접 지정 both register the pair. What separates them is what the tools
+        // *start from* -- `WikiTools.defaultFolders` reads the mode -- and whether a
+        // digest also rides in front of the question, which `WikiContext` decides.
+        guard WikiSettings.mode != .off, let root = WikiSettings.rootURL else { return nil }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory),
               isDirectory.boolValue

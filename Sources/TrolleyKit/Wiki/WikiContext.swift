@@ -144,7 +144,12 @@ public final class WikiContext {
         // Checked before the walk, not inside `decide`: walking the disk only to throw
         // the result away is the one cost this can avoid outright, and this runs on
         // the main thread between a keystroke and a network request.
-        guard WikiSettings.isEnabled else { return nil }
+        //
+        // `.auto` is the same early return as `.off` here and a different thing entirely
+        // one level down: it means the wiki is reachable but nothing rides *in front of*
+        // the question, because under that mode the model asks for what it needs through
+        // `wiki_search` once it knows what was asked.
+        guard WikiSettings.mode == .manual else { return nil }
         let digest = currentDigest()
         let decision = WikiInjection.decide(
             enabled: true,

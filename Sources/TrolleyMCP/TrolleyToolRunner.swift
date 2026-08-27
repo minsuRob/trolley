@@ -71,9 +71,17 @@ public final class TrolleyToolRunner: LocalLLMToolRunning {
                 // renders them straight into the prompt as the call signature, so the
                 // `query`/`path` this used to say was an instruction to make a call that
                 // `WikiTools` rejects -- with no way for the model to find that out.
+                //
+                // And all of them, not the five this listed. Under `.auto` this line is
+                // the whole filter UI: whatever it does not name is an axis the model
+                // cannot choose, which would leave 유형·분류·영역·우선순위·폴더 to a
+                // setting made last week by someone who had not heard the question.
                 .init(name: "wiki_search",
-                      parameters: ["titleContains", "status", "assignee", "detail", "limit"],
-                      summary: "위키에서 문서를 찾는다. 제목·상태 등 한 줄 요약만 돌아온다"),
+                      parameters: [
+                          "titleContains", "status", "type", "category", "area",
+                          "priority", "assignee", "folder", "sort", "detail", "limit"
+                      ],
+                      summary: "위키에서 문서를 찾는다. 조건은 필요한 것만 골라 쓰고, 그냥 부르면 전체 목록"),
                 .init(name: "wiki_read", parameters: ["title"],
                       summary: "위키 문서 한 건의 본문을 읽는다. 제목은 [[ ]] 없이 그대로 넣는다")
             ], at: 0)

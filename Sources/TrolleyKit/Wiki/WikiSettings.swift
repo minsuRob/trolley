@@ -22,6 +22,7 @@ public enum WikiSettings {
 
     public static let rootKey = "trolley.wiki.root"
     public static let enabledKey = "trolley.wiki.enabled"
+    public static let modeKey = "trolley.wiki.mode"
     public static let filterKey = "trolley.wiki.filter"
     public static let budgetKey = "trolley.wiki.budgetCharacters"
     public static let sentConversationKey = "trolley.wiki.sent.conversationID"
@@ -61,12 +62,75 @@ public enum WikiSettings {
         return URL(fileURLWithPath: expanded)
     }
 
+    /// Who decides what the wiki contributes to a question.
+    ///
+    /// This replaced a boolean, and the reason is the middle case. On/off could only
+    /// say *whether* the wiki was consulted; the filter -- 유형, 상태, 영역, 담당, 폴더 --
+    /// was always a person's standing choice, made once in the options window and then
+    /// applied to every question regardless of what was asked. A question about one
+    /// task carried the same 84-title list as a question about none.
+    ///
+    /// `.auto` hands that choice to trolley instead: nothing rides in front of the
+    /// question, and the model picks the axes per question through `wiki_search`. That
+    /// is strictly more selective than any stored filter can be, because it is chosen
+    /// after the question is known rather than before.
+    public enum Mode: String, CaseIterable {
+        /// Nothing. No digest, and the wiki tools are not in the catalog either -- a
+        /// tool that is listed but must not be used is worse than one that is absent.
+        case off
+        /// trolley picks. No list in front of the question; `wiki_search`/`wiki_read`
+        /// are in the catalog with every axis open, and the stored filter is not
+        /// applied to them.
+        case auto
+        /// The stored filter decides, and its digest rides the first question of a
+        /// conversation. What every enabled wiki did before `.auto` existed.
+        case manual
+
+        public var title: String {
+            switch self {
+            case .off: return "끔"
+            case .auto: return "자동 — trolley가 고름"
+            case .manual: return "직접 지정"
+            }
+        }
+    }
+
     /// Off until someone turns it on. Injecting into a conversation nobody asked to
     /// have augmented is a context-budget surprise, and the setup row is where the
     /// asking happens.
+    ///
+    /// A build that predates `modeKey` stored only the boolean, and an enabled wiki
+    /// there becomes `.auto` rather than `.manual`. That is a deliberate change of
+    /// behaviour for someone who merely accepted the old default: the stored filter
+    /// they never opened was costing them the whole list on every first question, and
+    /// `.manual` is one radio button away for anyone who did mean it.
+    public static var mode: Mode {
+        get {
+            if let raw = defaults.string(forKey: modeKey), let stored = Mode(rawValue: raw) {
+                return stored
+            }
+            return defaults.bool(forKey: enabledKey) ? .auto : .off
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: modeKey)
+            // The boolean is still written, and for the same reason `WikiFilter` still
+            // encodes `includeSummary`: `trolley update` can put an older bundle back
+            // on the same defaults domain, and that build reads only this key.
+            defaults.set(newValue != .off, forKey: enabledKey)
+            // Only `.manual` ever sends a digest, so leaving it means whatever the
+            // conversation was told is no longer something to compare against.
+            if newValue != .manual { clearSent() }
+        }
+    }
+
+    /// Whether the wiki is reachable at all -- as a digest or as a tool.
+    ///
+    /// Kept because that is the question most callers actually have (the setup row, the
+    /// prewarm, the tool catalog), and none of them care which of the two enabled modes
+    /// is set. Writing `true` means `.auto`, which is what "turn the wiki on" now means.
     public static var isEnabled: Bool {
-        get { defaults.bool(forKey: enabledKey) }
-        set { defaults.set(newValue, forKey: enabledKey) }
+        get { mode != .off }
+        set { mode = newValue ? .auto : .off }
     }
 
     /// A stored filter that no longer decodes -- an older release's shape -- falls

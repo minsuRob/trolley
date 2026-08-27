@@ -47,6 +47,17 @@ private final class ToolFixture {
 
             # 끝난 일감
             """)
+        try write("logs/2026-07-05 회의.md", """
+            ---
+            유형: 회의
+            상태: 완료
+            생성일: 2026-07-05
+            갱신일: 2026-07-05
+            요약: "스프린트 회고"
+            ---
+
+            # 회의록
+            """)
         try write("_private/비밀.md", """
             ---
             유형: 일감
@@ -80,7 +91,11 @@ final class WikiToolsTests: XCTestCase {
         tools = WikiTools(
             index: WikiIndex(),
             rootURL: { [root = fixture.root] in root },
-            storedFilter: { WikiFilter() }
+            storedFilter: { WikiFilter() },
+            // Named rather than left to `WikiSettings.mode`: that reads the *test
+            // process's* defaults, so what these assert would depend on whatever the
+            // machine happened to have stored.
+            mode: { .auto }
         )
     }
 
@@ -169,9 +184,10 @@ final class WikiToolsTests: XCTestCase {
 
     // MARK: - wiki_search
 
+    /// Three: the two tasks and the meeting note under `logs/`, which 자동 reaches.
     func testSearchWithNoArgumentsReturnsEverything() throws {
         let result = try tools.search(args([:]))
-        XCTAssertEqual(strings(result, "pages").count, 2)
+        XCTAssertEqual(strings(result, "pages").count, 3)
     }
 
     func testSearchFiltersByStatus() throws {
@@ -204,7 +220,69 @@ final class WikiToolsTests: XCTestCase {
         let result = try tools.search(args(["limit": .int(1)]))
         guard case .object(let object) = result else { return XCTFail("객체가 아니다") }
         XCTAssertEqual(object["matched"], .int(1))
-        XCTAssertEqual(object["total"], .int(2))
+        XCTAssertEqual(object["total"], .int(3))
+    }
+
+    /// The call the model makes when it does not yet know what the vault holds.
+    ///
+    /// Its shape is different from a filtered search's on purpose: `.full` at 40 pages
+    /// is ~5,000 characters and `ToolCallContract.resultMessage` truncates the result at
+    /// 4,000, so a first look would come back cut off partway down the list -- the one
+    /// case where returning *more* pages is what makes the answer fit.
+    func testUnfilteredSearchReturnsTheWholeBoardAsTitles() throws {
+        let result = try tools.search(args([:]))
+        guard case .object(let object) = result else { return XCTFail("객체가 아니다") }
+        XCTAssertEqual(object["detail"], .string("titles"))
+        // 요약 is what `.full` adds, and no line may carry it here.
+        XCTAssertFalse(strings(result, "pages").contains { $0.contains("첫 일감의 요약") })
+    }
+
+    /// A search that narrowed something is looking for a page, not for the map, and
+    /// wants everything known about the few it found.
+    func testFilteredSearchKeepsTheFullLine() throws {
+        let result = try tools.search(args(["status": .array([.string("진행중")])]))
+        guard case .object(let object) = result else { return XCTFail("객체가 아니다") }
+        XCTAssertEqual(object["detail"], .string("full"))
+        XCTAssertTrue(strings(result, "pages").contains { $0.contains("첫 일감의 요약") })
+    }
+
+    /// The folder axis has to move the *walk*, not just filter its result. It used to
+    /// filter only: `wiki_search` always walked `context/**`, so no argument could
+    /// reach a page under `logs/` or `members/` and the model was told it did not exist.
+    func testFolderAxisReachesLogsAndMembers() throws {
+        let pages = strings(try tools.search(args(["folder": .array([.string("logs")])])), "pages")
+        XCTAssertEqual(pages.count, 1)
+        XCTAssertTrue(pages[0].contains("[[2026-07-05 회의]]"), pages[0])
+    }
+
+    /// 자동 means the person is not standing between the question and the vault, so the
+    /// optional folders are in reach without being asked for by name.
+    func testAutoModeSeesTheOptionalFoldersByDefault() throws {
+        XCTAssertTrue(strings(try tools.search(args([:])), "pages").contains { $0.contains("2026-07-05 회의") })
+    }
+
+    /// 직접 지정 keeps the stored folder choice as the default, because in that mode it
+    /// is a choice somebody actually made.
+    func testManualModeStaysInTheConfiguredFolders() throws {
+        let manual = WikiTools(
+            index: WikiIndex(),
+            rootURL: { [root = fixture.root] in root },
+            storedFilter: { WikiFilter(folders: ["context/tasks"]) },
+            mode: { .manual }
+        )
+        let pages = strings(try manual.search(args([:])), "pages")
+        XCTAssertFalse(pages.contains { $0.contains("2026-07-05 회의") }, pages.description)
+        XCTAssertEqual(pages.count, 2)
+    }
+
+    /// `sort` was one of the two axes the old implementation inherited from the stored
+    /// filter and never let the caller set.
+    func testSortIsTheCallersToChoose() throws {
+        let pages = strings(try tools.search(args([
+            "type": .array([.string("일감")]), "sort": .string("recent")
+        ])), "pages")
+        XCTAssertEqual(pages.count, 2)
+        XCTAssertTrue(pages[0].contains("[[끝난 일감]]"), pages.description)
     }
 
     /// The vault's own rules exclude `_private` from every index and search.

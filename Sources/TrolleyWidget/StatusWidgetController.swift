@@ -418,9 +418,16 @@ public final class StatusWidgetController {
     }
 
     private func computeWikiBadge() -> WikiBadge? {
-        guard WikiSettings.isEnabled, let digest = WikiContext.shared.currentDigest(),
-              !digest.isEmpty
-        else { return nil }
+        // 자동 answers without touching the disk, which is the cheaper half of why the
+        // check is here: `currentDigest()` renders the *stored* filter, and under 자동
+        // that filter decides nothing -- a count taken from it would be a number about
+        // a list that is never sent.
+        let mode = WikiSettings.mode
+        guard mode != .off else { return nil }
+        if mode == .auto {
+            return WikiBadge(matched: 0, attaching: false, isRefresh: false, capped: false, mode: .auto)
+        }
+        guard let digest = WikiContext.shared.currentDigest(), !digest.isEmpty else { return nil }
         let conversationID = LocalLLMSettings.conversationID
         let sent = WikiSettings.sent
         let alreadyToldThisOne = sent?.conversationID == conversationID

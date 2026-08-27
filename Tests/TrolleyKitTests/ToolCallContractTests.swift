@@ -106,6 +106,24 @@ final class ToolCallContractTests: XCTestCase {
         }
     }
 
+    /// Under `WikiSettings.Mode.auto` no list rides in front of the question, so the
+    /// contract has to say how a page is *found* and not only how one is read. It also
+    /// has to name which argument answers which kind of question -- a model told only
+    /// that `wiki_search` exists has no reason to prefer `assignee` over guessing a title.
+    func testWikiRuleSaysToSearchFirstAndWhichAxisToReachFor() {
+        let withWiki = tools + [
+            .init(name: "wiki_search", parameters: ["titleContains", "assignee"], summary: "위키를 찾는다"),
+            .init(name: "wiki_read", parameters: ["title"], summary: "위키 문서를 읽는다")
+        ]
+        let text = ToolCallContract.preamble(tools: withWiki)
+        XCTAssertTrue(text.contains("먼저 wiki_search 로 문서를 찾는다"), text)
+        for axis in ["titleContains", "assignee", "status", "area"] {
+            XCTAssertTrue(text.contains(axis), "\(axis) 를 어디에 쓰는지 말하지 않는다")
+        }
+        // The way in when it has no idea what the vault holds.
+        XCTAssertTrue(text.contains("조건 없이 그냥 부른다"), text)
+    }
+
     // MARK: - Reading it back
 
     func testCleanToolCall() {

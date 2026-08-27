@@ -26,6 +26,68 @@ final class WikiInjectionTests: XCTestCase {
         )
     }
 
+    // MARK: - The mode
+
+    /// The migration that matters: a build before `modeKey` stored only the boolean, and
+    /// whatever it said has to keep meaning something after the upgrade rather than
+    /// resetting the wiki to off for everyone who had it on.
+    func testAnUpgradedWikiKeepsWorkingAndLandsOnAuto() {
+        withCleanDefaults {
+            UserDefaults.standard.set(true, forKey: WikiSettings.enabledKey)
+            XCTAssertEqual(WikiSettings.mode, .auto)
+            XCTAssertTrue(WikiSettings.isEnabled)
+
+            UserDefaults.standard.set(false, forKey: WikiSettings.enabledKey)
+            XCTAssertEqual(WikiSettings.mode, .off)
+            XCTAssertFalse(WikiSettings.isEnabled)
+        }
+    }
+
+    /// `trolley update` can put an older bundle back on the same defaults domain, and
+    /// that build reads only the boolean. Writing both is what keeps a rollback from
+    /// silently turning the wiki off.
+    func testWritingTheModeAlsoWritesTheBooleanTheOldBuildReads() {
+        withCleanDefaults {
+            for mode in WikiSettings.Mode.allCases {
+                WikiSettings.mode = mode
+                XCTAssertEqual(
+                    UserDefaults.standard.bool(forKey: WikiSettings.enabledKey),
+                    mode != .off,
+                    "\(mode.rawValue) 가 옛 빌드에 잘못 보인다"
+                )
+            }
+        }
+    }
+
+    /// Only 직접 지정 ever sends a list, so leaving it means the record of what was sent
+    /// is about a mode that is no longer in force.
+    func testLeavingManualForgetsWhatWasSent() {
+        withCleanDefaults {
+            WikiSettings.mode = .manual
+            WikiSettings.sent = sent("conv-1", "aaa")
+            WikiSettings.mode = .auto
+            XCTAssertNil(WikiSettings.sent)
+        }
+    }
+
+    /// Runs a body against the two keys this file writes, then puts the domain back --
+    /// these are process defaults, and a test that leaves them set is a test that
+    /// changes what the next one reads.
+    private func withCleanDefaults(_ body: () -> Void) {
+        let defaults = UserDefaults.standard
+        let keys = [WikiSettings.modeKey, WikiSettings.enabledKey,
+                    WikiSettings.sentConversationKey, WikiSettings.sentHashKey,
+                    WikiSettings.sentCountKey]
+        let saved = keys.map { ($0, defaults.object(forKey: $0)) }
+        keys.forEach { defaults.removeObject(forKey: $0) }
+        defer {
+            for (key, value) in saved {
+                if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) }
+            }
+        }
+        body()
+    }
+
     // MARK: - The table
 
     /// A fresh conversation has been told nothing, whatever was sent to the last one.

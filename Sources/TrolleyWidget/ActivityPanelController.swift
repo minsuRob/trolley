@@ -14,6 +14,22 @@ struct WikiBadge: Equatable {
     let isRefresh: Bool
     /// The wiki changed, but this conversation has had as many refreshes as it may get.
     let capped: Bool
+    /// Under `.auto` every field above is moot: nothing is attached, so there is no
+    /// count to report and nothing to refresh. The line still has to say the wiki is
+    /// reachable, because "위키가 켜져 있는데 왜 아무 말도 없지" is the question a silent
+    /// hint would leave.
+    let mode: WikiSettings.Mode
+
+    init(
+        matched: Int, attaching: Bool, isRefresh: Bool, capped: Bool,
+        mode: WikiSettings.Mode = .manual
+    ) {
+        self.matched = matched
+        self.attaching = attaching
+        self.isRefresh = isRefresh
+        self.capped = capped
+        self.mode = mode
+    }
 }
 
 /// The local model's side of the panel, flattened for rendering. A snapshot
@@ -962,6 +978,9 @@ enum PanelFormat {
 
     static func promptHint(wiki: WikiBadge?) -> String {
         guard let wiki else { return plainHint }
+        if wiki.mode == .auto {
+            return plainHint + " · 위키는 trolley가 직접 찾아봅니다"
+        }
         if wiki.capped {
             return plainHint + " · 위키가 바뀌었습니다 (새 대화부터 반영)"
         }

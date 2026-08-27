@@ -428,7 +428,10 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         _ status: LocalLLMClient.Status
     ) -> [(label: String, value: String)] {
         let wikiTokens: Int?
-        if WikiSettings.isEnabled, let digest = WikiContext.shared.currentDigest() {
+        // Only 직접 지정 spends context up front. Under 자동 the wiki costs a tool result
+        // when it is used and nothing when it is not, so counting it here as a slice of
+        // the window taken would be reporting a reservation nobody made.
+        if WikiSettings.mode == .manual, let digest = WikiContext.shared.currentDigest() {
             wikiTokens = WikiDigestRenderer.approximateTokens(characters: digest.characters)
         } else {
             wikiTokens = nil
@@ -467,9 +470,10 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         lastWikiCheck = Date()
 
         let path = WikiSettings.rootPath
-        guard WikiSettings.isEnabled else {
+        let mode = WikiSettings.mode
+        guard mode != .off else {
             wikiState = .optional
-            wikiSummary = "꺼져 있음. 켜면 질문 앞에 위키 요약이 함께 갑니다 — \(path)"
+            wikiSummary = "꺼져 있음. 켜면 trolley 가 질문에 맞는 문서를 찾아봅니다 — \(path)"
             return
         }
         guard let digest = WikiContext.shared.currentDigest() else {
@@ -491,6 +495,13 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         }
 
         wikiState = .done
+        // Under 자동 the digest was still worth building -- it is how this row knows the
+        // folder reads at all -- but its size is not what the wiki costs, so the row
+        // reports what the mode means instead of a token count nothing will spend.
+        guard mode == .manual else {
+            wikiSummary = "자동 — trolley 가 질문에 맞는 문서를 직접 찾습니다 — " + path
+            return
+        }
         let tokens = WikiDigestRenderer.approximateTokens(characters: digest.characters)
         var detail = "\(digest.matched)/\(digest.total)건 · 약 \(tokens)토큰"
         detail += " (96K의 \(String(format: "%.1f", Double(tokens) / 960))%)"

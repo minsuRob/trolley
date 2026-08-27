@@ -21,11 +21,14 @@ struct WikiCommand: ParsableCommand {
     @Flag(help: "Store --root as the wiki folder and exit.")
     var save = false
 
-    @Flag(help: "Turn the digest on.")
+    @Flag(help: "Turn the wiki on, in 자동 mode. Same as --mode auto.")
     var enable = false
 
-    @Flag(help: "Turn the digest off, keeping the path and filters.")
+    @Flag(help: "Turn the wiki off, keeping the path and filters.")
     var disable = false
+
+    @Option(help: "How the wiki is consulted: off | auto (trolley picks per question) | manual (this filter's digest rides along).")
+    var mode: WikiSettings.Mode?
 
     @Flag(help: "Print the digest exactly as a question would carry it.")
     var preview = false
@@ -88,6 +91,9 @@ struct WikiCommand: ParsableCommand {
         if enable && disable {
             throw ValidationError("--enable 과 --disable 은 함께 쓸 수 없습니다.")
         }
+        if mode != nil, enable || disable {
+            throw ValidationError("--mode 와 --enable/--disable 은 함께 쓸 수 없습니다.")
+        }
 
         if save {
             guard let root else { throw ValidationError("--save 는 --root 와 함께 씁니다.") }
@@ -103,9 +109,17 @@ struct WikiCommand: ParsableCommand {
             print("위키 폴더: \(WikiSettings.rootPath)")
             return
         }
+        // `--mode` is the whole truth and `--enable/--disable` are the two shortcuts
+        // people already have in their fingers, so they set the same value rather than
+        // a parallel one that could disagree with it.
+        if let mode {
+            WikiSettings.mode = mode
+            print("위키 참고: \(WikiSettings.mode.title)")
+            return
+        }
         if enable || disable {
-            WikiSettings.isEnabled = enable
-            print("위키 참고: \(WikiSettings.isEnabled ? "켜짐" : "꺼짐")")
+            WikiSettings.mode = enable ? .auto : .off
+            print("위키 참고: \(WikiSettings.mode.title)")
             return
         }
         if let setMe {
@@ -204,7 +218,7 @@ struct WikiCommand: ParsableCommand {
 
     private func printStatus(url: URL, snapshot: WikiSnapshot, filter: WikiFilter, digest: WikiDigest) {
         print("경로     : \(WikiSettings.rootPath)")
-        print("사용     : \(WikiSettings.isEnabled ? "켜짐" : "꺼짐")")
+        print("사용     : \(WikiSettings.mode.title)")
         print("필터     : \(WikiDigestRenderer.describe(filter))")
         print("정렬     : \(filter.sort.title) · 최대 \(filter.maxCount)건 · 상세 \(filter.detail.title)")
         print("스캔     : 파일 \(snapshot.scannedFiles)건 → 페이지 \(snapshot.pages.count)건" +
@@ -265,3 +279,4 @@ struct WikiCommand: ParsableCommand {
 /// `RawRepresentable<String>` plus `CaseIterable` is all ArgumentParser needs -- it
 /// gets the parsing and the value list in `--help` for free.
 extension WikiFilter.Detail: ExpressibleByArgument {}
+extension WikiSettings.Mode: ExpressibleByArgument {}

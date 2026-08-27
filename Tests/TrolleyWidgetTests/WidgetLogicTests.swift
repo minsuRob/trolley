@@ -126,6 +126,18 @@ final class PromptHintTests: XCTestCase {
         XCTAssertTrue(PanelFormat.promptHint(wiki: badge(isRefresh: true)).contains("다시 첨부"))
     }
 
+    /// Under 자동 there is nothing attached and nothing to count, but the line still has
+    /// to say the wiki is reachable -- silence there reads as "위키가 켜져 있는데 왜
+    /// 아무 말도 없지".
+    func testAutoSaysTrolleyLooksItUpItself() {
+        let hint = PanelFormat.promptHint(
+            wiki: WikiBadge(matched: 0, attaching: false, isRefresh: false, capped: false, mode: .auto)
+        )
+        XCTAssertTrue(hint.hasPrefix(PanelFormat.plainHint))
+        XCTAssertTrue(hint.contains("trolley가 직접 찾아봅니다"), hint)
+        XCTAssertFalse(hint.contains("0건"), hint)
+    }
+
     /// The normal state after the first question of a conversation. It has to read as
     /// ordinary, not as something having gone wrong.
     func testAlreadySentReadsAsNormal() {
