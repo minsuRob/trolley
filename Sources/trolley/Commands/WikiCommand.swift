@@ -218,7 +218,11 @@ struct WikiCommand: ParsableCommand {
 
     private func printStatus(url: URL, snapshot: WikiSnapshot, filter: WikiFilter, digest: WikiDigest) {
         print("경로     : \(WikiSettings.rootPath)")
-        print("사용     : \(WikiSettings.mode.title)")
+        // The suffix is the difference between "this is how you set it up" and "this is
+        // what the folder made of itself" -- and only the second one leaves a person
+        // wondering when they turned it on.
+        let how = WikiSettings.modeWasDetected ? " (폴더가 있어 자동으로)" : ""
+        print("사용     : \(WikiSettings.mode.title)\(how)")
         print("필터     : \(WikiDigestRenderer.describe(filter))")
         print("정렬     : \(filter.sort.title) · 최대 \(filter.maxCount)건 · 상세 \(filter.detail.title)")
         print("스캔     : 파일 \(snapshot.scannedFiles)건 → 페이지 \(snapshot.pages.count)건" +

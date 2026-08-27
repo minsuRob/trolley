@@ -208,7 +208,14 @@ final class WikiToolsTests: XCTestCase {
         let narrow = WikiTools(
             index: WikiIndex(),
             rootURL: { [root = fixture.root] in root },
-            storedFilter: { WikiFilter.default }   // 상태=진행중
+            storedFilter: { WikiFilter.default },   // 상태=진행중
+            // Pinned for the reason `setUpWithError` pins it, and this is the case that
+            // proved the reason: left to `WikiSettings.mode` it read the test process's
+            // defaults, where a wiki checkout on the machine is now enough to resolve to
+            // `.auto` -- which widens the default folders and puts a second page in the
+            // result. 직접 지정 is the mode where a stored filter is in force at all, so
+            // it is also the only one this test has anything to say about.
+            mode: { .manual }
         )
         let result = try narrow.search(args(["status": .array([.string("완료")])]))
         let pages = strings(result, "pages")

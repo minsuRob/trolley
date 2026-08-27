@@ -29,10 +29,15 @@ final class WikiInjectionTests: XCTestCase {
     // MARK: - The mode
 
     /// The migration that matters: a build before `modeKey` stored only the boolean, and
-    /// whatever it said has to keep meaning something after the upgrade rather than
-    /// resetting the wiki to off for everyone who had it on.
-    func testAnUpgradedWikiKeepsWorkingAndLandsOnAuto() {
-        withCleanDefaults {
+    /// a true there has to keep meaning something after the upgrade rather than resetting
+    /// the wiki to off for everyone who had it on.
+    ///
+    /// The false half is asserted against a root that is *not* a wiki on purpose. A false
+    /// boolean is the old default -- every install that never opened the window has one --
+    /// so it is not what decides; the folder is. See `testAFolderThatIsThereTurnsItOn`.
+    func testAnUpgradedWikiKeepsWorkingAndLandsOnAuto() throws {
+        let empty = try emptyFolder()
+        try withCleanDefaults(root: empty.path) {
             UserDefaults.standard.set(true, forKey: WikiSettings.enabledKey)
             XCTAssertEqual(WikiSettings.mode, .auto)
             XCTAssertTrue(WikiSettings.isEnabled)
@@ -43,11 +48,60 @@ final class WikiInjectionTests: XCTestCase {
         }
     }
 
+    /// The point of the whole change. Nobody has chosen anything, and a checkout is
+    /// sitting at the configured path -- so it is on, and the row can say why.
+    func testAFolderThatIsThereTurnsItOn() throws {
+        let fixture = try WikiFixture()
+        try fixture.write("context/tasks/할 일.md", "---\n유형: 기능\n---\n")
+        try withCleanDefaults(root: fixture.root.path) {
+            XCTAssertEqual(WikiSettings.mode, .auto)
+            XCTAssertTrue(WikiSettings.modeWasDetected)
+        }
+    }
+
+    /// The default path is prefilled into every install, so "a readable folder exists
+    /// there" cannot be the test -- it would switch the wiki on for whatever happened to
+    /// be sitting at somebody else's `~/Desktop/workspace/MAKi/markhub-llm-wiki`. The
+    /// vault's own layout has to be under it.
+    func testAFolderThatIsNotAWikiLeavesItOff() throws {
+        let folder = try emptyFolder()
+        try FileManager.default.createDirectory(
+            at: folder.appendingPathComponent("docs"), withIntermediateDirectories: true
+        )
+        try withCleanDefaults(root: folder.path) {
+            XCTAssertFalse(WikiSettings.rootIsReadable)
+            XCTAssertEqual(WikiSettings.mode, .off)
+            XCTAssertFalse(WikiSettings.modeWasDetected)
+        }
+    }
+
+    /// Detection is a default, not an override. Someone who picks 끔 with the vault right
+    /// there has said something the disk does not get to contradict -- and if it did,
+    /// there would be no way to turn the wiki off at all.
+    func testChoosingOffBeatsAFolderThatIsThere() throws {
+        let fixture = try WikiFixture()
+        try fixture.write("context/tasks/할 일.md", "---\n유형: 기능\n---\n")
+        try withCleanDefaults(root: fixture.root.path) {
+            WikiSettings.mode = .off
+            XCTAssertTrue(WikiSettings.rootIsReadable)
+            XCTAssertEqual(WikiSettings.mode, .off)
+            XCTAssertFalse(WikiSettings.modeWasDetected)
+        }
+    }
+
+    private func emptyFolder() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wiki-empty-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+
     /// `trolley update` can put an older bundle back on the same defaults domain, and
     /// that build reads only the boolean. Writing both is what keeps a rollback from
     /// silently turning the wiki off.
-    func testWritingTheModeAlsoWritesTheBooleanTheOldBuildReads() {
-        withCleanDefaults {
+    func testWritingTheModeAlsoWritesTheBooleanTheOldBuildReads() throws {
+        try withCleanDefaults(root: emptyFolder().path) {
             for mode in WikiSettings.Mode.allCases {
                 WikiSettings.mode = mode
                 XCTAssertEqual(
@@ -61,8 +115,8 @@ final class WikiInjectionTests: XCTestCase {
 
     /// Only 직접 지정 ever sends a list, so leaving it means the record of what was sent
     /// is about a mode that is no longer in force.
-    func testLeavingManualForgetsWhatWasSent() {
-        withCleanDefaults {
+    func testLeavingManualForgetsWhatWasSent() throws {
+        try withCleanDefaults(root: emptyFolder().path) {
             WikiSettings.mode = .manual
             WikiSettings.sent = sent("conv-1", "aaa")
             WikiSettings.mode = .auto
@@ -70,20 +124,30 @@ final class WikiInjectionTests: XCTestCase {
         }
     }
 
-    /// Runs a body against the two keys this file writes, then puts the domain back --
-    /// these are process defaults, and a test that leaves them set is a test that
-    /// changes what the next one reads.
-    private func withCleanDefaults(_ body: () -> Void) {
+    /// Runs a body against the keys this file writes, then puts the domain back -- these
+    /// are process defaults, and a test that leaves them set is a test that changes what
+    /// the next one reads.
+    ///
+    /// `root` is not optional by accident. `mode` now reads the disk when nothing is
+    /// stored, and the path it reads when `rootKey` is unset is the real vault -- so a
+    /// test that left it unset would pass or fail on whether the machine running it
+    /// happens to have that checkout. Every caller names a folder it created itself.
+    private func withCleanDefaults(root: String, _ body: () -> Void) throws {
         let defaults = UserDefaults.standard
-        let keys = [WikiSettings.modeKey, WikiSettings.enabledKey,
+        let keys = [WikiSettings.modeKey, WikiSettings.enabledKey, WikiSettings.rootKey,
                     WikiSettings.sentConversationKey, WikiSettings.sentHashKey,
                     WikiSettings.sentCountKey]
         let saved = keys.map { ($0, defaults.object(forKey: $0)) }
         keys.forEach { defaults.removeObject(forKey: $0) }
+        defaults.set(root, forKey: WikiSettings.rootKey)
+        // Written straight to the domain rather than through `rootPath`, which is what
+        // usually clears the memoised probe -- so clear it here, both ways.
+        WikiSettings.invalidateRootProbe()
         defer {
             for (key, value) in saved {
                 if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) }
             }
+            WikiSettings.invalidateRootProbe()
         }
         body()
     }

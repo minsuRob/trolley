@@ -15,9 +15,11 @@ public enum WikiSettings {
     /// it: those files are edited daily by people, and a test that reads them fails on
     /// someone else's commit.
     ///
-    /// Prefilling a path is safe only because `isEnabled` starts false. A wrong model
-    /// address fails loudly on the next question; a wrong *path* just quietly reads
-    /// somebody else's folder, so nothing is read until a person switches it on.
+    /// Prefilling a path is safe because of what `rootIsReadable` asks of it. A wrong
+    /// model address fails loudly on the next question; a wrong *path* just quietly
+    /// reads somebody else's folder -- so the folder at this path has to carry the
+    /// vault's own `context/` layout before anything reads it, and a folder that merely
+    /// happens to sit here is not mistaken for the wiki.
     public static let fallbackRoot = "~/Desktop/workspace/MAKi/markhub-llm-wiki"
 
     public static let rootKey = "trolley.wiki.root"
@@ -53,6 +55,9 @@ public enum WikiSettings {
             }
             // Pages from the previous checkout must not survive into the new one.
             clearSent()
+            // And neither may the verdict on whether the previous one was a wiki --
+            // `mode` reads that, so a stale one decides on/off for the next two seconds.
+            invalidateRootProbe()
         }
     }
 
@@ -60,6 +65,64 @@ public enum WikiSettings {
         let expanded = NSString(string: rootPath).expandingTildeInPath
         guard !expanded.isEmpty else { return nil }
         return URL(fileURLWithPath: expanded)
+    }
+
+    // MARK: - A wiki that is simply there
+
+    /// How long a look at the root is trusted for. Two seconds, matching the gate
+    /// `WikiIndex` puts in front of its walk, and for the same reason: `mode` reads this,
+    /// and `mode` is read on every send, on every tool-catalog build, and forty times a
+    /// minute by the setup window's repaint timer.
+    private static let probeInterval: TimeInterval = 2.0
+    private static let probeLock = NSLock()
+    private static var probed: (path: String, readable: Bool, at: Date)?
+
+    /// Whether `rootPath` currently points at something that reads like the vault.
+    ///
+    /// A readable directory is deliberately not enough. The default path is prefilled
+    /// into every install, so "a folder exists there" says nothing about whether it is
+    /// this team's wiki; one of the folders the index actually walks has to be under it.
+    /// That is the whole difference between switching on for a checkout somebody has and
+    /// switching on for a coincidence.
+    ///
+    /// Three `stat`s at worst, memoised -- see `probeInterval` for why that matters.
+    public static var rootIsReadable: Bool {
+        guard let root = rootURL else { return false }
+        probeLock.lock()
+        let hit = probed
+        probeLock.unlock()
+        if let hit, hit.path == root.path, Date().timeIntervalSince(hit.at) < probeInterval {
+            return hit.readable
+        }
+        let readable = probeRoot(root)
+        probeLock.lock()
+        probed = (root.path, readable, Date())
+        probeLock.unlock()
+        return readable
+    }
+
+    /// Makes the next `rootIsReadable` look at the disk again. The root setter calls it;
+    /// so does anything that has just changed what the disk would answer -- a folder
+    /// picked through the panel is readable a moment after it was not, and waiting out
+    /// the memo would show 꺼짐 for two seconds after the grant.
+    public static func invalidateRootProbe() {
+        probeLock.lock()
+        probed = nil
+        probeLock.unlock()
+    }
+
+    private static func probeRoot(_ root: URL) -> Bool {
+        let manager = FileManager.default
+        guard isDirectory(manager, root.path), manager.isReadableFile(atPath: root.path)
+        else { return false }
+        return WikiIndex.indexableFolders.contains { folder in
+            isDirectory(manager, root.appendingPathComponent(folder).path)
+        }
+    }
+
+    private static func isDirectory(_ manager: FileManager, _ path: String) -> Bool {
+        var isDirectory: ObjCBool = false
+        return manager.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
     }
 
     /// Who decides what the wiki contributes to a question.
@@ -95,21 +158,31 @@ public enum WikiSettings {
         }
     }
 
-    /// Off until someone turns it on. Injecting into a conversation nobody asked to
-    /// have augmented is a context-budget surprise, and the setup row is where the
-    /// asking happens.
+    /// On when there is a wiki to be on about.
     ///
-    /// A build that predates `modeKey` stored only the boolean, and an enabled wiki
-    /// there becomes `.auto` rather than `.manual`. That is a deliberate change of
-    /// behaviour for someone who merely accepted the old default: the stored filter
-    /// they never opened was costing them the whole list on every first question, and
-    /// `.manual` is one radio button away for anyone who did mean it.
+    /// This used to start `.off` and wait to be switched on, and what that cost is the
+    /// reason it no longer does: the folder read fine, the options window's preview
+    /// listed all 48 pages of it, and the setup row still said 꺼져 있음 -- because the
+    /// preview never consulted the switch. A checkbox standing between a folder already
+    /// on the disk and the wiki counting for anything only ever produced that.
+    ///
+    /// So the disk decides, unless a person has said otherwise. A stored choice always
+    /// wins: picking 끔 writes `modeKey`, and that keeps it off for good. `.auto` rather
+    /// than `.manual` is what a detected wiki lands on -- it is the mode that spends no
+    /// context up front, which is the only honest default for something nobody asked
+    /// for.
+    ///
+    /// The legacy boolean still means `.auto` when it says true. When it says false it is
+    /// *not* read as a refusal: false was the old default, so it is equally what every
+    /// install that never opened the window stored, and the two cannot be told apart.
+    /// Anyone who does mean off now says so in a window that records it as such.
     public static var mode: Mode {
         get {
             if let raw = defaults.string(forKey: modeKey), let stored = Mode(rawValue: raw) {
                 return stored
             }
-            return defaults.bool(forKey: enabledKey) ? .auto : .off
+            if defaults.bool(forKey: enabledKey) { return .auto }
+            return rootIsReadable ? .auto : .off
         }
         set {
             defaults.set(newValue.rawValue, forKey: modeKey)
@@ -121,6 +194,17 @@ public enum WikiSettings {
             // conversation was told is no longer something to compare against.
             if newValue != .manual { clearSent() }
         }
+    }
+
+    /// True when nothing is stored and the folder itself is what turned the wiki on.
+    ///
+    /// Exists so the setup row and `trolley wiki` can say *why* it is on. Being told the
+    /// wiki is 자동 is not the same as being told nobody chose that -- and someone who
+    /// wants it off needs to know there is a switch they have never touched.
+    public static var modeWasDetected: Bool {
+        defaults.string(forKey: modeKey) == nil
+            && !defaults.bool(forKey: enabledKey)
+            && rootIsReadable
     }
 
     /// Whether the wiki is reachable at all -- as a digest or as a tool.

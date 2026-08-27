@@ -473,7 +473,12 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         let mode = WikiSettings.mode
         guard mode != .off else {
             wikiState = .optional
-            wikiSummary = "꺼져 있음. 켜면 trolley 가 질문에 맞는 문서를 찾아봅니다 — \(path)"
+            // Two different silences, and saying the same thing about both is what sent
+            // someone hunting for a switch. Off with a wiki sitting right there is a
+            // choice that was made; off without one is nothing to choose about yet.
+            wikiSummary = WikiSettings.rootIsReadable
+                ? "끔으로 설정돼 있습니다. 설정에서 자동을 고르면 다시 켜집니다 — \(path)"
+                : "읽을 수 있는 위키 폴더가 없습니다. 폴더를 지정하면 바로 켜집니다 — \(path)"
             return
         }
         guard let digest = WikiContext.shared.currentDigest() else {
@@ -499,7 +504,11 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         // folder reads at all -- but its size is not what the wiki costs, so the row
         // reports what the mode means instead of a token count nothing will spend.
         guard mode == .manual else {
-            wikiSummary = "자동 — trolley 가 질문에 맞는 문서를 직접 찾습니다 — " + path
+            // Whoever never opened the options window did not turn this on, and a row
+            // that reads 자동 without saying so leaves them looking for the moment they
+            // did. The folder being there is the whole reason.
+            let why = WikiSettings.modeWasDetected ? "자동 (폴더가 있어 켜짐)" : "자동"
+            wikiSummary = why + " — trolley 가 질문에 맞는 문서를 직접 찾습니다 — " + path
             return
         }
         let tokens = WikiDigestRenderer.approximateTokens(characters: digest.characters)
