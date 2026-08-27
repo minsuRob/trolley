@@ -11,7 +11,7 @@
 # 쓴다. 유니버설 빌드·공증 왕복·Finder 창 배치도 로컬 확인엔 필요 없어 뺐다.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-source Scripts/signing-keychain.sh
+source Scripts/app-bundle.sh
 
 DIST=dist
 DMGROOT="$DIST/dev-dmgroot"
@@ -19,42 +19,16 @@ APP="$DMGROOT/trolley.app"
 
 trap trolley_keychain_destroy EXIT
 
-VERSION=$(sed -n 's/.*public static let current = "\([^"]*\)".*/\1/p' Sources/TrolleyKit/Version.swift)
-if [ -z "$VERSION" ]; then
-    echo "error: Sources/TrolleyKit/Version.swift에서 버전을 읽지 못했습니다." >&2
-    exit 1
-fi
-COMMIT="dev-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
-    COMMIT="$COMMIT-dirty"
-fi
+trolley_stamp_version
 echo "==> trolley $VERSION ($COMMIT) -- dev dmg (공증 없음)"
 
-echo "==> 빌드 ($(uname -m))"
-swift build -c release
-BINARY=$(swift build -c release --show-bin-path)/trolley
-[ -f "$BINARY" ] || { echo "error: $BINARY 가 없습니다." >&2; exit 1; }
+trolley_build_native_release
 
 echo "==> 서명용 임시 키체인 준비"
 trolley_keychain_create_dev
 
 echo "==> 앱 번들 조립"
-rm -rf "$DMGROOT"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-install -m 755 "$BINARY" "$APP/Contents/MacOS/trolley"
-sed -e "s/@VERSION@/$VERSION/g" -e "s/@COMMIT@/$COMMIT/g" \
-    Scripts/app/Info.plist > "$APP/Contents/Info.plist"
-
-ICONSET="$DIST/trolley.iconset"
-rm -rf "$ICONSET"
-"$BINARY" export-icon --output "$ICONSET" >/dev/null
-iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/trolley.icns"
-rm -rf "$ICONSET"
-
-echo "==> 서명: $TROLLEY_SIGN_ID"
-codesign --force --options runtime --timestamp \
-    --keychain "$TROLLEY_KEYCHAIN" --sign "$TROLLEY_SIGN_ID" "$APP"
-codesign --verify --deep --strict --verbose=2 "$APP"
+trolley_assemble_signed_bundle "$APP"
 
 echo "==> dmg 생성"
 ln -s /Applications "$DMGROOT/Applications"

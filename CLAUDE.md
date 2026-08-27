@@ -12,32 +12,44 @@ macOS 접근성 트리로 GUI 앱을 조작하는 Swift CLI이자, 그 위에 �
 computer use 로 넘어간다. 아래는 띄우는 방법만 적는다:
 
 ```sh
-Scripts/dev-run.sh            # swift build → .build/dev/trolley.app → open -n
-Scripts/dev-run.sh --replace  # 이미 떠 있는 설치본을 먼저 종료
+Scripts/dev-run.sh            # 빌드 → 서명 → /Applications/trolley.app 바꿔치기 → 재실행
+Scripts/dev-run.sh --preview  # 안 건드리고 잠깐 보기: swift build → .build/dev → open -n
 ```
 
 - `swift run trolley` 로는 창이 **안 뜬다.** `WelcomeFlow.shouldRun()` 이 "launchd 가 이
   번들의 identifier 로 띄웠을 것"을 요구하는데 맨 바이너리에는 identifier 가 없다. 안 뜬다고
   코드를 의심하지 말 것 — 설계대로다.
 - 확인하겠다고 `Scripts/build-installer.sh` 를 직접 돌리지 않는다. 저건 배포 절차다:
-  유니버설 빌드, 임시 키체인, Developer ID 서명, 공증 Apple 왕복 8~10분. 권한이 걸린 것을
-  볼 때만 필요하고, 그때도 `dev-run.sh --signed` 가 대신 부른다 (아래).
-- **`/Applications/trolley.app` 을 건드리지 않는다.** 거기 있는 것은 사람이 지금 쓰고 있는
-  앱이다. dev 번들은 `.build/dev` 에서 따로 돌고, identifier 가 같아 나란히 떠도 된다.
-  방금 빌드한 쪽은 창 제목의 커밋이 `dev-` 로 시작한다. 끌 때는
-  `pkill -f '.build/dev/trolley.app'` 로 그쪽만 끈다.
+  유니버설 빌드, 임시 키체인, Developer ID 서명, 공증 Apple 왕복 8~10분. `dev-run.sh` 의
+  기본 경로는 이미 서명하므로 권한을 보려고 이걸 따로 쓸 일은 이제 거의 없다 — 여전히
+  필요한 건 유니버설 빌드 자체를 테스트할 때뿐이다 (아래 절 참고).
+- **`dev-run.sh` 기본값은 `/Applications/trolley.app` 을 그 자리에서 바꿔치고, 떠 있던
+  걸 죽이고 다시 연다 — 의도한 것이다.** 애드혹 서명(옛 기본 경로)은 빌드마다 cdhash 가
+  바뀌어 손쉬운 사용·화면 기록 허락을 매번 다시 묻는데, 설치본 자리에서 Developer ID로
+  서명해 두면 허락이 (경로 + 팀 id)에 묶여 그대로 유지된다. 위키 대화나 LLM 생성이 진행
+  중이어도 상관없이 교체한다 — `UpdateCoordinator` 가 "설치는 항상 사용자 클릭이 있을 때만"
+  으로 설계된 이유(진행 중인 세션은 우리 것이 아니라 마음대로 끊어도 되는 게 아니다)를
+  알고도 명시적으로 포기한 것이다. 원자적 스왑은 `trolley install-local`(숨김 서브커맨드,
+  `trolley update` 가 쓰는 것과 같은 `LiveUpdateIO` 경로)이 한다.
+  안 건드리고 잠깐 보기만 하려면 `--preview` — 애드혹 서명, `.build/dev` 에서 열리고
+  `/Applications` 는 손대지 않는다(옛 `--release`/`--replace`/`--signed` 도 `--preview`
+  뒤에서 그대로 동작한다). 끌 때는 메뉴 막대에서 종료하거나 `pkill -x trolley`.
 - 준비 항목 세 줄(위치·손쉬운 사용·화면 기록)이 주황인 것은 정상이다. 그 세 줄로
   무언가를 판단하지 말 것 — 이유는 아래.
 - 화면과 무관한 변경은 `swift test` 로 끝낸다. 띄우는 것은 눈으로 볼 것이 있을 때만.
 
 ## 권한이 걸린 것을 확인할 때는 서명 빌드로
 
+`dev-run.sh` 기본값이 이제 항상 Developer ID로 서명해 설치본 자리에 두므로, 일상적인
+권한 확인에는 이 절이 더 이상 필요 없다. 아래는 `--preview` 로 애드혹 서명을 쓸 때,
+또는 유니버설 빌드 자체(`build-installer.sh`)를 테스트할 때만 해당한다.
+
 ```sh
-Scripts/dev-run.sh --signed   # 몇 분 걸린다. 권한 볼 때만.
+Scripts/dev-run.sh --preview --signed   # 몇 분 걸린다. 유니버설 빌드를 볼 때만.
 ```
 
-기본 경로(`swift build`)는 **애드혹으로 서명**한다 — `TeamIdentifier` 가 없고 cdhash 가
-빌드마다 바뀐다. 손쉬운 사용·화면 기록·데스크탑 접근은 전부 서명에 묶이므로, macOS 는 매
+애드혹 서명(`--preview` 의 기본 경로)은 `TeamIdentifier` 가 없고 cdhash 가 빌드마다
+바뀐다. 손쉬운 사용·화면 기록·데스크탑 접근은 전부 서명에 묶이므로, macOS 는 매
 실행을 처음 보는 앱으로 취급한다. 한 번 허락해도 다음 빌드가 물려받지 못하고, 팝업이 계속
 뜬다.
 
@@ -47,15 +59,18 @@ Scripts/dev-run.sh --signed   # 몇 분 걸린다. 권한 볼 때만.
 **앱이 멈춘 것처럼 보이면 코드를 의심하기 전에 `sample <pid>` 를 먼저 떠 볼 것.**
 `open` 안에서 멈춰 있으면 그것은 버그가 아니라 대기 중인 동의 창이다.
 
-`--signed` 는 Developer ID 로 서명한다(공증은 생략 — 이 맥에서 실행하는 데는 필요 없다).
-`.build/signed/trolley.app` 에서 뜨고 `/Applications` 는 건드리지 않는다. **손쉬운 사용과
-화면 기록은 이걸로 해결된다** — 실측으로 두 줄이 주황에서 초록이 됐다. 허락이 (번들 id +
-팀 id) 에 묶이는데 그 둘이 설치본과 같아서 그대로 물려받고, 다시 빌드해도 유지된다.
+`--preview --signed` 는 Developer ID 로 서명한다(공증은 생략 — 이 맥에서 실행하는 데는
+필요 없다). `.build/signed/trolley.app` 에서 뜨고 `/Applications` 는 건드리지 않는다.
+허락이 (번들 id + 팀 id) 에 묶이는데 그 둘이 설치본과 같으므로 그대로 물려받고, 다시
+빌드해도 유지된다 — 지금은 `dev-run.sh` 기본값도 이 성질을 그대로 쓰지만, 결과물이
+`/Applications/trolley.app` 자리 그 자체라는 점만 다르다.
 
-**파일 및 폴더(데스크탑)는 물려받지 못한다.** 그건 경로로도 걸리는 허락이라
-`/Applications/trolley.app` 의 것이 `.build/signed/trolley.app` 에 적용되지 않는다. 위키 볼트가
-`~/Desktop` 아래라 위키 목록이 안 뜨면 그것이다 — **시스템 설정 → 개인정보 보호 및 보안 →
-파일 및 폴더**에서 그 번들에 한 번 허락해 주면 된다(창이 4초 뒤에 같은 안내를 띄운다).
+**`--preview --signed` 는 파일 및 폴더(데스크탑)를 물려받지 못한다.** 그건 경로로도
+걸리는 허락이라 `/Applications/trolley.app` 의 것이 `.build/signed/trolley.app` 에
+적용되지 않는다. 위키 볼트가 `~/Desktop` 아래라 위키 목록이 안 뜨면 그것이다 —
+**시스템 설정 → 개인정보 보호 및 보안 → 파일 및 폴더**에서 그 번들에 한 번 허락해
+주면 된다(창이 4초 뒤에 같은 안내를 띄운다). `dev-run.sh` 기본값은 경로 자체가
+`/Applications/trolley.app` 이라 이 문제가 아예 없다 — 파일 및 폴더도 그대로 물려받는다.
 
 유니버설 릴리스 빌드와 SSM 서명 자산이 필요해 몇 분 걸리므로, 권한과 무관한 확인에는
 쓰지 않는다.

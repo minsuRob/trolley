@@ -26,6 +26,11 @@ TROLLEY_SIGN_ID=""
 TROLLEY_PREV_KEYCHAINS=""
 TROLLEY_PREV_DEFAULT=""
 
+# 이 계정의 서명 자산은 ap-northeast-2 에 있다. aws CLI 에 기본 리전이 잡혀 있지
+# 않은 맥에서는 이게 없으면 "NoRegion" 으로 실패한다 -- 실측. 이미 다른 리전을
+# export 해 둔 호출자는 안 건드린다.
+export AWS_REGION="${AWS_REGION:-ap-northeast-2}"
+
 # One place to repoint if these ever move accounts.
 trolley_ssm() {
     aws ssm get-parameter --name "${TROLLEY_SSM_PREFIX:-/front/master}/$1" \
