@@ -50,6 +50,19 @@ public enum WikiSettings {
     /// Where the wiki window's divider was left, in points of list width.
     public static let windowListWidthKey = "trolley.wiki.window.listWidth"
 
+    /// Whether the setup window has already tried, once, to find the vault on its own.
+    ///
+    /// Unlike `rootPath`/`me` this posts no notification -- nothing needs to react to it
+    /// changing, only to read it before deciding to search again. `false` forever once a
+    /// real vault is found is not the goal: this only stops the *silent, automatic* first
+    /// try from repeating on every refresh tick, not the button someone can still press.
+    private static let autoSearchDoneKey = "trolley.wiki.autoSearchDone"
+
+    public static var hasAutoSearched: Bool {
+        get { defaults.bool(forKey: autoSearchDoneKey) }
+        set { defaults.set(newValue, forKey: autoSearchDoneKey) }
+    }
+
     /// Written by builds that gated the wiki behind a switch. Named only so an upgrade
     /// can clear them: an old bundle put back by `trolley update` would read `enabled`
     /// again, and leaving a stale `false` there would turn its wiki off for reasons
@@ -117,7 +130,7 @@ public enum WikiSettings {
         if let hit, hit.path == root.path, Date().timeIntervalSince(hit.at) < probeInterval {
             return hit.readable
         }
-        let readable = probeRoot(root)
+        let readable = isWikiRoot(root)
         probeLock.lock()
         probed = (root.path, readable, Date())
         probeLock.unlock()
@@ -134,7 +147,11 @@ public enum WikiSettings {
         probeLock.unlock()
     }
 
-    private static func probeRoot(_ root: URL) -> Bool {
+    /// Whether `root` reads like the vault -- a readable directory with at least one of
+    /// the folders the index actually walks underneath it. Public so `WikiRootFinder` can
+    /// run the same check against whatever Spotlight turns up, rather than trusting a
+    /// same-named decoy folder.
+    public static func isWikiRoot(_ root: URL) -> Bool {
         let manager = FileManager.default
         guard isDirectory(manager, root.path), manager.isReadableFile(atPath: root.path)
         else { return false }

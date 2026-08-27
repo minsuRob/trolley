@@ -21,6 +21,8 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
     private let window: NSWindow
 
     private let pathField = NSTextField(labelWithString: "")
+    /// Title flips between `다시 읽기` and `폴더 찾기` -- see `updateReloadButton()`.
+    private let reloadButton = NSButton(title: "", target: nil, action: nil)
     /// What the filter is for, now that it is not a switch on anything.
     private let filterNote = NSTextField(labelWithString: "")
 
@@ -144,9 +146,10 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
         let chooseButton = NSButton(title: "폴더 선택…", target: self, action: #selector(chooseFolder))
         chooseButton.bezelStyle = .rounded
         chooseButton.controlSize = .small
-        let reloadButton = NSButton(title: "다시 읽기", target: self, action: #selector(reload))
         reloadButton.bezelStyle = .rounded
         reloadButton.controlSize = .small
+        reloadButton.target = self
+        reloadButton.action = #selector(reloadOrFind)
 
         let pathRow = NSStackView(views: [pathField, NSView(), chooseButton, reloadButton])
         pathRow.orientation = .horizontal
@@ -333,6 +336,7 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
         defer { isPopulating = false }
 
         pathField.stringValue = WikiSettings.rootPath
+        updateReloadButton()
         let filter = WikiSettings.filter
         select(typePopup, filter.types)
         select(categoryPopup, filter.categories)
@@ -418,14 +422,57 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
             self.pathField.stringValue = url.path
             WikiIndex.shared.invalidate()
             WikiContext.shared.invalidate()
+            self.updateReloadButton()
             self.refreshPreview()
         }
     }
 
-    @objc private func reload() {
-        WikiIndex.shared.invalidate()
-        WikiContext.shared.invalidate()
-        refreshPreview()
+    /// `다시 읽기` when the field already names a real vault, `폴더 찾기` when it does not --
+    /// a button that only ever reread the same wrong folder would never fix the mismatch
+    /// this file exists to fix.
+    @objc private func reloadOrFind() {
+        if let root = currentPathURL(), WikiSettings.isWikiRoot(root) {
+            WikiIndex.shared.invalidate()
+            WikiContext.shared.invalidate()
+            refreshPreview()
+            return
+        }
+        runAutoSearch()
+    }
+
+    private func runAutoSearch() {
+        reloadButton.isEnabled = false
+        reloadButton.title = "찾는 중…"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let found = WikiRootFinder.find()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let found {
+                    self.pathField.stringValue = found.path
+                    WikiIndex.shared.invalidate()
+                    WikiContext.shared.invalidate()
+                    self.refreshPreview()
+                } else {
+                    self.show(
+                        summary: "자동으로 찾지 못했습니다. 폴더 선택으로 직접 골라 주세요.",
+                        body: self.previewText.string
+                    )
+                }
+                self.updateReloadButton()
+            }
+        }
+    }
+
+    private func updateReloadButton() {
+        reloadButton.isEnabled = true
+        let readable = currentPathURL().map(WikiSettings.isWikiRoot) ?? false
+        reloadButton.title = readable ? "다시 읽기" : "폴더 찾기"
+    }
+
+    private func currentPathURL() -> URL? {
+        let expanded = NSString(string: pathField.stringValue).expandingTildeInPath
+        guard !expanded.isEmpty else { return nil }
+        return URL(fileURLWithPath: expanded)
     }
 
     @objc private func controlChanged() {

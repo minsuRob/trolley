@@ -60,6 +60,9 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     private var wikiSummary: String?
     private var wikiState: SetupRow.State = .optional
     private var lastWikiCheck: Date?
+    /// Set while `WikiRootFinder.find()` is running on a background queue, so a second
+    /// press -- or the automatic first try -- cannot start a second one alongside it.
+    private var wikiSearchInFlight = false
 
     /// Same treatment as the MCP row: a network round trip must not ride the
     /// 1.5-second repaint timer.
@@ -459,16 +462,61 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     /// open" — opened from the widget panel's "위키 열기(N개)" button, not from a second
     /// button here.
     private func refreshWikiRow() {
+        if wikiSearchInFlight {
+            wikiRow.update(
+                state: .optional, detail: "위키 폴더를 찾는 중…", button: nil, action: nil
+            )
+            return
+        }
+
         checkWikiIfDue()
         let readable = wikiState == .done
+        // Not readable, and nothing has tried to find it on its own yet -- give the
+        // silent first attempt a chance before making anyone press a button.
+        if !readable, !WikiSettings.hasAutoSearched {
+            beginWikiAutoSearch(interactive: false)
+        }
         wikiRow.update(
             state: wikiState,
             detail: wikiSummary ?? "확인 중…",
             // Readable 이면 열 곳은 이미 패널의 "위키 열기(N개)" 버튼이다 — 여기서
             // 또 하나를 그리면 같은 동작이 화면에 두 번 뜬다.
-            button: readable ? nil : "폴더 지정",
-            action: readable ? nil : { [weak self] in self?.wikiSettings.show() }
+            button: readable ? nil : "폴더 찾기",
+            action: readable ? nil : { [weak self] in self?.beginWikiAutoSearch(interactive: true) }
         )
+    }
+
+    /// Runs `WikiRootFinder` off the main thread and applies whatever it finds.
+    ///
+    /// `interactive` is only about what happens on failure: the silent first try
+    /// (`refreshWikiRow`'s own call) should just leave the row as it was, but a press on
+    /// `폴더 찾기` that finds nothing has to hand off to the picker -- that button used to
+    /// open it directly, and someone who came here to choose a folder by hand must still
+    /// be able to.
+    private func beginWikiAutoSearch(interactive: Bool) {
+        guard !wikiSearchInFlight else { return }
+        wikiSearchInFlight = true
+        refreshWikiRow()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let found = WikiRootFinder.find()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.wikiSearchInFlight = false
+                WikiSettings.hasAutoSearched = true
+                if let found {
+                    WikiSettings.rootPath = found.path
+                    WikiIndex.shared.invalidate()
+                    WikiContext.shared.invalidate()
+                    WikiIndex.shared.prewarm(root: found)
+                } else if interactive {
+                    self.wikiSettings.show()
+                }
+                // Unthrottled: a search that just ran is exactly the reason to look at
+                // the disk again right now, not up to five seconds from now.
+                self.lastWikiCheck = nil
+                self.refreshWikiRow()
+            }
+        }
     }
 
     private func checkWikiIfDue() {
