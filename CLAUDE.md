@@ -5,7 +5,11 @@ macOS 접근성 트리로 GUI 앱을 조작하는 Swift CLI이자, 그 위에 �
 
 ## 확인은 자체 빌드로만 한다
 
-화면에 보이는 것이 바뀌었으면 띄워서 눈으로 본다. 띄우는 방법은 하나뿐이다:
+화면에 보이는 것이 바뀌었으면 띄워서 눈으로 본다. **그 절차는 `docs/검증.md` 에 있다 —
+확인을 시작하기 전에 읽는다.** 공증 없는 빌드로 띄우고, 창은 trolley 자체의 computer use
+로 열고(`trolley click`), 무엇이 어디에 있는지는 `trolley dump-tree --frames` 로 재고,
+그림은 `Scripts/window-shot.swift` 로 창 단위로 찍는다. 그 경로가 막혔을 때만 Claude 의
+computer use 로 넘어간다. 아래는 띄우는 방법만 적는다:
 
 ```sh
 Scripts/dev-run.sh            # swift build → .build/dev/trolley.app → open -n

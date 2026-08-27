@@ -194,8 +194,9 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
             ("title", "제목", CGFloat(180), CGFloat(90), CGFloat(4_000)),
             ("status", "상태", 56, 44, 160),
             // 담당 holds a handle, and 76 fit eight characters only when nothing else
-            // spilled. The default fits `minsuRob`; longer handles are a drag away.
-            ("assignee", "담당", 96, 56, 320)
+            // spilled. The default is measured against the longest handle in the vault
+            // (`MINHYEOKJEON99`, fourteen characters); anything longer is a drag away.
+            ("assignee", "담당", 112, 56, 320)
         ] {
             let column = NSTableColumn(identifier: .init(identifier))
             column.title = title

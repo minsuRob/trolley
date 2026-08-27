@@ -18,6 +18,9 @@ struct DumpTreeCommand: ParsableCommand {
     @Option(help: "Write output to this file instead of stdout.")
     var output: String?
 
+    @Flag(help: "Include each element's position and size in screen points.")
+    var frames = false
+
     func run() throws {
         let checker = SystemTrustChecker()
         guard AccessibilityPermission.ensureTrusted(checker: checker, prompt: true) else {
@@ -39,7 +42,7 @@ struct DumpTreeCommand: ParsableCommand {
         _ = root.setAttribute(AXAttr.manualAccessibility, value: true as CFBoolean)
         Thread.sleep(forTimeInterval: 1.5)
         let limits = AXTraversalLimits(maxDepth: maxDepth)
-        let text = AXTreeDumper().dump(root: root, limits: limits)
+        let text = AXTreeDumper().dump(root: root, limits: limits, includeFrames: frames)
 
         if let output {
             try text.write(toFile: output, atomically: true, encoding: .utf8)
