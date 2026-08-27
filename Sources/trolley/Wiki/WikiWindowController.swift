@@ -24,6 +24,12 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
     private let searchField = NSSearchField()
     private let folderPopup = NSPopUpButton()
     private let statusPopup = NSPopUpButton()
+    /// 담당, built at runtime from whatever handles the vault currently holds -- the only
+    /// one of the three whose values are not known before a walk.
+    private let assigneePopup = NSPopUpButton()
+    /// What `assigneePopup` was last built from, so a reload that changes nothing does
+    /// not rebuild the menu under someone's open dropdown.
+    private var knownAssignees: [String] = []
 
     private let table = NSTableView()
     private let tableScroll = NSScrollView()
@@ -95,6 +101,8 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
             lastRootPath = WikiSettings.rootPath
             openPage = nil
         }
+        // The options window's 내 일감 can move 담당 while this one is closed.
+        restoreToolbar()
         reloadList()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -112,22 +120,27 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
         searchField.sendsSearchStringImmediately = false
         searchField.widthAnchor.constraint(equalToConstant: 220).isActive = true
 
-        folderPopup.addItem(withTitle: "폴더 전체")
+        folderPopup.addItem(withTitle: Self.anyFolder)
         for folder in WikiIndex.indexableFolders + WikiIndex.optionalFolders {
             folderPopup.addItem(withTitle: folder)
         }
-        statusPopup.addItem(withTitle: "상태 전체")
-        for status in ["진행중", "대기", "보류", "완료"] {
+        statusPopup.addItem(withTitle: Self.anyStatus)
+        for status in Self.statuses {
             statusPopup.addItem(withTitle: status)
         }
-        for popup in [folderPopup, statusPopup] {
+        // 전체/미지정 only until a walk returns; `refreshAssigneeMenu` appends the handles.
+        assigneePopup.addItems(withTitles: [Self.anyAssignee, Self.noAssignee])
+        for popup in [folderPopup, statusPopup, assigneePopup] {
             popup.target = self
             popup.action = #selector(filterChanged)
         }
+        restoreToolbar()
 
         let settingsButton = NSButton(title: "상세 설정", target: self, action: #selector(openSettings))
         settingsButton.bezelStyle = .rounded
-        let topRow = NSStackView(views: [searchField, folderPopup, statusPopup, NSView(), settingsButton])
+        let topRow = NSStackView(
+            views: [searchField, folderPopup, statusPopup, assigneePopup, NSView(), settingsButton]
+        )
         topRow.orientation = .horizontal
         topRow.spacing = 8
 
@@ -248,23 +261,142 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
 
     // MARK: - The list
 
-    /// The filter the list starts from: whatever the options window stored, narrowed by
-    /// the three controls up top.
-    ///
-    /// `maxCount` is deliberately not the stored one. That number exists to keep a digest
-    /// inside a character budget, and nothing here is budgeted -- a person scrolling a
-    /// table is not spending context.
+    // 전체 rows, and the one that means "nobody". Named because two places have to agree
+    // about what sits at the top of each menu: the code that builds it and the code that
+    // reads the selection back.
+    static let anyFolder = "폴더 전체"
+    static let anyStatus = "상태 전체"
+    static let anyAssignee = "담당 전체"
+    static let noAssignee = "미지정"
+    static let statuses = ["진행중", "대기", "보류", "완료"]
+    static var folders: [String] { WikiIndex.indexableFolders + WikiIndex.optionalFolders }
+
     private func currentFilter() -> WikiFilter {
-        var filter = WikiSettings.filter
+        Self.filter(
+            base: WikiSettings.filter,
+            search: searchField.stringValue,
+            folder: selection(folderPopup, any: Self.anyFolder),
+            status: selection(statusPopup, any: Self.anyStatus),
+            assignee: currentAssignee()
+        )
+    }
+
+    /// The list the window shows: the stored filter, narrowed by the toolbar.
+    ///
+    /// Pure and static so the rule below can be asserted without a window.
+    ///
+    /// - Parameter base: what the options window stored. Its `assignees` is **dropped**,
+    ///   not merged. That stored handle is why the window used to open on ten pages out
+    ///   of two hundred with no visible reason, and the toolbar is now where 담당 is
+    ///   decided -- inheriting it would make 담당 전체 mean "전체, except for the person
+    ///   somebody picked in another window last week".
+    /// - Parameter assignee: nil is 전체, `""` is 미지정, anything else is a handle.
+    static func filter(
+        base: WikiFilter, search: String,
+        folder: String?, status: String?, assignee: String?
+    ) -> WikiFilter {
+        var filter = base
+        // Not the stored `maxCount`: that number keeps a digest inside a character
+        // budget, and nothing here is budgeted -- a person scrolling a table is not
+        // spending context.
         filter.maxCount = 2_000
-        filter.titleContains = searchField.stringValue.trimmingCharacters(in: .whitespaces)
-        if folderPopup.indexOfSelectedItem > 0, let folder = folderPopup.titleOfSelectedItem {
-            filter.folders = [folder]
-        }
-        if statusPopup.indexOfSelectedItem > 0, let status = statusPopup.titleOfSelectedItem {
-            filter.statuses = [status]
-        }
+        filter.titleContains = search.trimmingCharacters(in: .whitespaces)
+        filter.assignees = assignee.map { [$0] } ?? []
+        if let folder { filter.folders = [folder] }
+        if let status { filter.statuses = [status] }
         return filter
+    }
+
+    /// The popup's value, or nil when it is sitting on its 전체 row.
+    private func selection(_ popup: NSPopUpButton, any: String) -> String? {
+        guard let title = popup.titleOfSelectedItem, title != any else { return nil }
+        return title
+    }
+
+    private func currentAssignee() -> String? {
+        guard let title = assigneePopup.titleOfSelectedItem, title != Self.anyAssignee else {
+            return nil
+        }
+        return title == Self.noAssignee ? "" : title
+    }
+
+    // MARK: - The toolbar, remembered
+
+    /// Puts the three dropdowns back where they were left.
+    ///
+    /// A stored value that no longer exists -- a folder dropped from the vault, a 상태
+    /// nobody uses any more -- falls back to 전체 rather than selecting nothing. A popup
+    /// with no selection reads as 전체 anyway and would then filter by it silently.
+    /// 담당 is the exception: its menu is built from a walk that has not happened yet, so
+    /// the stored handle is added now and `refreshAssigneeMenu` keeps it.
+    private func restoreToolbar() {
+        select(folderPopup, WikiSettings.windowFolder, any: Self.anyFolder)
+        select(statusPopup, WikiSettings.windowStatus, any: Self.anyStatus)
+        switch WikiSettings.windowAssignee {
+        case .none: assigneePopup.selectItem(withTitle: Self.anyAssignee)
+        case .some(""): assigneePopup.selectItem(withTitle: Self.noAssignee)
+        case .some(let handle):
+            if !assigneePopup.itemTitles.contains(handle) {
+                assigneePopup.addItem(withTitle: handle)
+            }
+            assigneePopup.selectItem(withTitle: handle)
+        }
+    }
+
+    private func select(_ popup: NSPopUpButton, _ stored: String?, any: String) {
+        popup.selectItem(
+            withTitle: Self.toolbarSelection(stored: stored, available: popup.itemTitles, any: any)
+        )
+    }
+
+    /// Which row a remembered value should land on.
+    ///
+    /// Pure because the interesting case is the one nobody sees coming: a folder that has
+    /// left the vault, or a 상태 this build no longer offers. Selecting nothing there
+    /// leaves a popup that reads as 전체 and filters by something else.
+    static func toolbarSelection(stored: String?, available: [String], any: String) -> String {
+        guard let stored, available.contains(stored) else { return any }
+        return stored
+    }
+
+    /// Written the moment a dropdown moves. No 저장 button: these are the knobs someone
+    /// turns while reading, and a knob that forgets is one they turn again every morning.
+    private func rememberToolbar() {
+        WikiSettings.windowFolder = selection(folderPopup, any: Self.anyFolder)
+        WikiSettings.windowStatus = selection(statusPopup, any: Self.anyStatus)
+        let assignee = currentAssignee()
+        WikiSettings.windowAssignee = assignee
+        // Whoever you keep filtering to is who 내 일감 means. Learned from the pick rather
+        // than asked for in a field of its own -- this used to live on the options
+        // window's 저장, which is where 담당 used to live.
+        if let assignee, !assignee.isEmpty { WikiSettings.me = assignee }
+    }
+
+    /// Rebuilds 담당 from what the walk found, without losing the current pick.
+    ///
+    /// The union with the selection is the part that matters: a handle that has left the
+    /// vault -- or one the CLI wrote and no snapshot has shown yet -- still has to appear,
+    /// because a selection that quietly falls off the menu is a filter that quietly
+    /// widens. Same rule the options window used when this popup lived there.
+    private func refreshAssigneeMenu(from handles: [String]) {
+        let selected = currentAssignee()
+        let merged = Set(handles).union(selected.map { [$0] } ?? [])
+            .filter { !$0.isEmpty }
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        guard merged != knownAssignees else { return }
+        knownAssignees = merged
+
+        assigneePopup.removeAllItems()
+        assigneePopup.addItems(withTitles: [Self.anyAssignee, Self.noAssignee])
+        if !merged.isEmpty {
+            assigneePopup.menu?.addItem(.separator())
+            assigneePopup.addItems(withTitles: merged)
+        }
+        switch selected {
+        case .none: assigneePopup.selectItem(withTitle: Self.anyAssignee)
+        case .some(""): assigneePopup.selectItem(withTitle: Self.noAssignee)
+        case .some(let handle): assigneePopup.selectItem(withTitle: handle)
+        }
     }
 
     /// Walks the vault and fills the table -- off the main thread, always.
@@ -336,6 +468,8 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
     private func apply(_ outcome: Result<WikiSnapshot, Error>, filter: WikiFilter) {
         switch outcome {
         case .success(let snapshot):
+            // From the snapshot the walk already returned, not a second one.
+            refreshAssigneeMenu(from: snapshot.pages.map(\.assignee))
             let (kept, dropped) = filter.apply(to: snapshot.pages)
             pages = kept
             countLabel.stringValue = dropped > 0
@@ -372,7 +506,10 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
         table.scrollRowToVisible(row)
     }
 
-    @objc private func filterChanged() { reloadList() }
+    @objc private func filterChanged() {
+        rememberToolbar()
+        reloadList()
+    }
 
     @objc private func openSettings() { settings.show() }
 

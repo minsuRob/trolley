@@ -21,28 +21,54 @@ public enum MarkdownRendering {
         let mono: NSFont
         let textColor: NSColor
         let secondaryColor: NSColor
+        /// Point sizes for `#`, `##`, and everything below.
+        ///
+        /// Here rather than in `attributes(run:block:style:)`, where they were constants
+        /// -- 13 and 12, chosen for a 360pt panel whose body is 11. The wiki window's body
+        /// is 13, so its `#` came out at 13: a heading the same size as the paragraph
+        /// under it, told apart by weight alone. A surface that sets its own body size has
+        /// to be able to set the sizes that hang off it.
+        let heading: (h1: CGFloat, h2: CGFloat, rest: CGFloat)
 
-        public init(body: NSFont, mono: NSFont, textColor: NSColor, secondaryColor: NSColor) {
+        public init(
+            body: NSFont, mono: NSFont, textColor: NSColor, secondaryColor: NSColor,
+            heading: (h1: CGFloat, h2: CGFloat, rest: CGFloat)
+        ) {
             self.body = body
             self.mono = mono
             self.textColor = textColor
             self.secondaryColor = secondaryColor
+            self.heading = heading
+        }
+
+        func headingSize(level: Int) -> CGFloat {
+            switch level {
+            case ...1: return heading.h1
+            case 2: return heading.h2
+            default: return heading.rest
+            }
         }
 
         /// Small, with tighter indents than a document would use -- 360pt is not much.
+        /// Two steps for a top-level heading, one for everything below it: a panel this
+        /// narrow cannot spend more than that on hierarchy.
         public static let panel = Style(
             body: .systemFont(ofSize: 11),
             mono: .monospacedSystemFont(ofSize: 10, weight: .regular),
             textColor: .labelColor,
-            secondaryColor: .secondaryLabelColor
+            secondaryColor: .secondaryLabelColor,
+            heading: (13, 12, 12)
         )
 
-        /// A page being read rather than a reply being watched.
+        /// A page being read rather than a reply being watched. `###` lands on the body
+        /// size and is carried by weight, which is what the panel already does one step
+        /// down -- past three levels a wiki page is not using hierarchy to be read.
         public static let document = Style(
             body: .systemFont(ofSize: 13),
             mono: .monospacedSystemFont(ofSize: 12, weight: .regular),
             textColor: .labelColor,
-            secondaryColor: .secondaryLabelColor
+            secondaryColor: .secondaryLabelColor,
+            heading: (16, 14, 13)
         )
     }
 
@@ -204,9 +230,7 @@ public enum MarkdownRendering {
 
         switch block {
         case .heading(let level):
-            // Two steps for a top-level heading, one for everything below it. A panel
-            // this narrow cannot spend more than that on hierarchy.
-            font = .systemFont(ofSize: level <= 1 ? 13 : 12, weight: .semibold)
+            font = .systemFont(ofSize: style.headingSize(level: level), weight: .semibold)
         case .code:
             font = style.mono
             color = style.secondaryColor

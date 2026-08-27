@@ -31,6 +31,17 @@ public enum WikiSettings {
     public static let filterKey = "trolley.wiki.filter"
     public static let budgetKey = "trolley.wiki.budgetCharacters"
 
+    /// The wiki window's three toolbar dropdowns, remembered.
+    ///
+    /// Deliberately not folded into `filter`. That one is the *stored* filter -- what
+    /// `trolley wiki` runs and what the options window calls 기본 목록 -- and it is
+    /// changed deliberately, behind a 저장 button. These are the knobs someone turns while
+    /// looking at the list, written the moment they turn, and read back the next time the
+    /// window opens. Mixing them would mean every idle narrowing rewrote the CLI's filter.
+    public static let windowAssigneeKey = "trolley.wiki.window.assignee"
+    public static let windowFolderKey = "trolley.wiki.window.folder"
+    public static let windowStatusKey = "trolley.wiki.window.status"
+
     /// Written by builds that gated the wiki behind a switch. Named only so an upgrade
     /// can clear them: an old bundle put back by `trolley update` would read `enabled`
     /// again, and leaving a stale `false` there would turn its wiki off for reasons
@@ -137,6 +148,44 @@ public enum WikiSettings {
     /// what was sent is a claim about a conversation this build cannot make.
     public static func forgetRetiredSettings() {
         for key in retiredKeys { defaults.removeObject(forKey: key) }
+    }
+
+    /// Who the wiki window is filtered to, or nil for 전체.
+    ///
+    /// Three states in one key, which is why it is a `String?` rather than a `Set`:
+    /// absent is 전체, `""` is 미지정, anything else is a handle. The empty string already
+    /// means 미지정 to `WikiFilter.assignees`, so this borrows a convention rather than
+    /// inventing one -- and `UserDefaults.string(forKey:)` tells `""` apart from a key
+    /// that was never written, which is the whole trick.
+    ///
+    /// 전체 is the default on purpose. The stored filter has narrowed to one handle for
+    /// as long as it has existed, so the window used to open on ten of the vault's two
+    /// hundred pages with the reason two windows away.
+    public static var windowAssignee: String? {
+        get { defaults.string(forKey: windowAssigneeKey) }
+        set { setOptional(newValue, forKey: windowAssigneeKey) }
+    }
+
+    /// The folder the window is narrowed to, or nil for 폴더 전체.
+    public static var windowFolder: String? {
+        get { defaults.string(forKey: windowFolderKey) }
+        set { setOptional(newValue, forKey: windowFolderKey) }
+    }
+
+    /// The 상태 the window is narrowed to, or nil for 상태 전체.
+    public static var windowStatus: String? {
+        get { defaults.string(forKey: windowStatusKey) }
+        set { setOptional(newValue, forKey: windowStatusKey) }
+    }
+
+    /// Removes rather than stores nil, so "never chosen" stays distinguishable from a
+    /// choice -- `windowAssignee` needs `""` to mean something of its own.
+    private static func setOptional(_ value: String?, forKey key: String) {
+        if let value {
+            defaults.set(value, forKey: key)
+        } else {
+            defaults.removeObject(forKey: key)
+        }
     }
 
     /// A stored filter that no longer decodes -- an older release's shape -- falls

@@ -131,4 +131,29 @@ final class MarkdownRenderingTests: XCTestCase {
         let markdown = "# 제목\n\n- 하나\n- 둘"
         XCTAssertEqual(MarkdownRendering.plainText(markdown), render(markdown).string)
     }
+
+    // MARK: - Heading sizes per surface
+
+    /// The bug: heading sizes were constants -- 13 and 12 -- chosen for a panel whose body
+    /// is 11. The wiki window's body is 13, so `#` rendered at 13 and a heading came out
+    /// the same size as the paragraph under it.
+    func testDocumentHeadingsAreLargerThanItsBody() {
+        let style = MarkdownRendering.Style.document
+        let h1 = font(MarkdownRendering.attributed("# 제목", style: style), at: 0)!
+        let h2 = font(MarkdownRendering.attributed("## 제목", style: style), at: 0)!
+        let body = font(MarkdownRendering.attributed("본문", style: style), at: 0)!
+
+        XCTAssertGreaterThan(h1.pointSize, body.pointSize)
+        XCTAssertGreaterThan(h2.pointSize, body.pointSize)
+        XCTAssertGreaterThan(h1.pointSize, h2.pointSize)
+    }
+
+    /// The panel was not asked to change, and a shared constant is exactly how it would
+    /// have been dragged along.
+    func testPanelHeadingSizesAreUnchanged() {
+        let style = MarkdownRendering.Style.panel
+        XCTAssertEqual(font(MarkdownRendering.attributed("# 제목", style: style), at: 0)?.pointSize, 13)
+        XCTAssertEqual(font(MarkdownRendering.attributed("## 제목", style: style), at: 0)?.pointSize, 12)
+        XCTAssertEqual(font(MarkdownRendering.attributed("### 제목", style: style), at: 0)?.pointSize, 12)
+    }
 }

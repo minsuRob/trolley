@@ -1,4 +1,5 @@
 import AppKit
+import TrolleyKit
 import XCTest
 @testable import trolley
 
@@ -39,5 +40,133 @@ final class WikiWindowTests: XCTestCase {
     /// below `wiki_read`'s own 8,000 because the contract and the question ride with it.
     func testTheContextLimitLeavesRoomForTheContractAndTheQuestion() {
         XCTAssertLessThan(WikiWindowController.contextLimit, 8_000)
+    }
+
+    // MARK: - What the toolbar filters to
+
+    private func base() -> WikiFilter {
+        var filter = WikiFilter()
+        filter.assignees = ["minsuRob"]   // what the options window had stored
+        filter.maxCount = 150
+        return filter
+    }
+
+    /// The rule this change exists for. The stored filter has been narrowed to one handle
+    /// for as long as it has existed, so the window opened on ten of the vault's two
+    /// hundred pages with the reason two windows away. 담당 is the toolbar's now, and
+    /// inheriting the stored one would make 담당 전체 mean "전체, except that person".
+    func testTheStoredAssigneeIsNotInherited() {
+        let filter = WikiWindowController.filter(
+            base: base(), search: "", folder: nil, status: nil, assignee: nil
+        )
+        XCTAssertTrue(filter.assignees.isEmpty, "\(filter.assignees)")
+    }
+
+    func testThePickedAssigneeWins() {
+        let picked = WikiWindowController.filter(
+            base: base(), search: "", folder: nil, status: nil, assignee: "songjein"
+        )
+        XCTAssertEqual(picked.assignees, ["songjein"])
+        // "" is 미지정, which `WikiFilter` already reads as "pages with no 담당" -- the
+        // convention this borrows rather than inventing a second one.
+        let unassigned = WikiWindowController.filter(
+            base: base(), search: "", folder: nil, status: nil, assignee: ""
+        )
+        XCTAssertEqual(unassigned.assignees, [""])
+    }
+
+    /// A person scrolling a table is not spending context, so the digest's count cap has
+    /// no business bounding the list.
+    func testTheStoredCountCapDoesNotBoundTheList() {
+        let filter = WikiWindowController.filter(
+            base: base(), search: " 검색어 ", folder: "logs", status: "완료", assignee: nil
+        )
+        XCTAssertGreaterThan(filter.maxCount, 150)
+        XCTAssertEqual(filter.titleContains, "검색어")
+        XCTAssertEqual(filter.folders, ["logs"])
+        XCTAssertEqual(filter.statuses, ["완료"])
+    }
+
+    /// A folder that has left the vault, or a 상태 this build no longer offers. Selecting
+    /// nothing leaves a popup that reads as 전체 while filtering by something else.
+    func testAStoredValueThatNoLongerExistsFallsBackToAll() {
+        let available = [WikiWindowController.anyFolder] + WikiWindowController.folders
+        XCTAssertEqual(
+            WikiWindowController.toolbarSelection(
+                stored: "context/tasks", available: available, any: WikiWindowController.anyFolder
+            ),
+            "context/tasks"
+        )
+        XCTAssertEqual(
+            WikiWindowController.toolbarSelection(
+                stored: "없어진폴더", available: available, any: WikiWindowController.anyFolder
+            ),
+            WikiWindowController.anyFolder
+        )
+        XCTAssertEqual(
+            WikiWindowController.toolbarSelection(
+                stored: nil, available: available, any: WikiWindowController.anyFolder
+            ),
+            WikiWindowController.anyFolder
+        )
+    }
+}
+
+/// The three knobs the wiki window remembers between launches.
+final class WikiWindowSettingsTests: XCTestCase {
+    /// Three states in one key, and the two that look alike are the ones that matter:
+    /// never chosen is 전체, and `""` is 미지정 -- a real selection.
+    func testTheAssigneeKeyTellsUnsetApartFromUnassigned() {
+        withWindowKeys {
+            XCTAssertNil(WikiSettings.windowAssignee)
+
+            WikiSettings.windowAssignee = ""
+            XCTAssertEqual(WikiSettings.windowAssignee, "")
+
+            WikiSettings.windowAssignee = "minsuRob"
+            XCTAssertEqual(WikiSettings.windowAssignee, "minsuRob")
+
+            WikiSettings.windowAssignee = nil
+            XCTAssertNil(WikiSettings.windowAssignee)
+        }
+    }
+
+    func testFolderAndStatusRoundTrip() {
+        withWindowKeys {
+            WikiSettings.windowFolder = "logs"
+            WikiSettings.windowStatus = "완료"
+            XCTAssertEqual(WikiSettings.windowFolder, "logs")
+            XCTAssertEqual(WikiSettings.windowStatus, "완료")
+            WikiSettings.windowFolder = nil
+            XCTAssertNil(WikiSettings.windowFolder)
+            XCTAssertEqual(WikiSettings.windowStatus, "완료", "한 쪽을 지우면 다른 쪽까지 지워진다")
+        }
+    }
+
+    /// These are the window's knobs, not the CLI's filter. Turning one must not rewrite
+    /// what `trolley wiki` runs.
+    func testTheyDoNotTouchTheStoredFilter() {
+        withWindowKeys {
+            let before = WikiSettings.filter
+            WikiSettings.windowAssignee = "songjein"
+            WikiSettings.windowFolder = "members"
+            XCTAssertEqual(WikiSettings.filter, before)
+        }
+    }
+
+    private func withWindowKeys(_ body: () -> Void) {
+        let defaults = UserDefaults.standard
+        let keys = [
+            WikiSettings.windowAssigneeKey, WikiSettings.windowFolderKey,
+            WikiSettings.windowStatusKey
+        ]
+        let saved = keys.map { ($0, defaults.object(forKey: $0)) }
+        keys.forEach { defaults.removeObject(forKey: $0) }
+        defer {
+            for (key, value) in saved {
+                if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) }
+            }
+        }
+        body()
     }
 }
