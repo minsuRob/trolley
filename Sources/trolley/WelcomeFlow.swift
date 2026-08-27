@@ -97,6 +97,7 @@ enum WelcomeFlow {
         // `WikiWindowController` -- and the conversation inside it -- alive across all
         // three ways in.
         controller.onOpenWiki = { openWiki() }
+        controller.onOpenWikiPage = { page in openWiki(page: page) }
 
         startUpdateChecks(reporting: controller)
 
@@ -224,5 +225,12 @@ enum WelcomeFlow {
     static func openWiki() {
         if wiki == nil { wiki = WikiWindowController() }
         wiki?.show()
+    }
+
+    /// The same window, opened straight to one page -- what the panel's 내 일감 preview
+    /// calls when a title is clicked.
+    static func openWiki(page: WikiPage) {
+        if wiki == nil { wiki = WikiWindowController() }
+        wiki?.open(page)
     }
 }

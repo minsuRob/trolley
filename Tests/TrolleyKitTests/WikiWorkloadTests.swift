@@ -73,4 +73,35 @@ final class WikiWorkloadTests: XCTestCase {
 
         XCTAssertEqual(WikiWorkload.count(in: pages, handle: "minsuRob"), 60)
     }
+
+    /// `pages`, unlike `count`, is a preview -- truncating to `limit` is the point.
+    func testPagesIsCappedAtTheGivenLimit() {
+        let pages = (0..<60).map {
+            makeWikiPage("일감\($0)", status: "진행중", assignee: "minsuRob")
+        }
+
+        XCTAssertEqual(WikiWorkload.pages(in: pages, handle: "minsuRob", limit: 5).count, 5)
+    }
+
+    /// Same filter as `count` -- someone else's work, and other statuses, stay out of
+    /// the preview the same way they stay out of the number.
+    func testPagesAppliesTheSameFilterAsCount() {
+        let pages = [
+            makeWikiPage("내것", status: "진행중", assignee: "minsuRob"),
+            makeWikiPage("남의것", status: "진행중", assignee: "someoneElse"),
+            makeWikiPage("끝난것", status: "완료", assignee: "minsuRob")
+        ]
+
+        XCTAssertEqual(
+            WikiWorkload.pages(in: pages, handle: "minsuRob", limit: 5).map(\.basename), ["내것"]
+        )
+    }
+
+    /// Same trap `count` guards against: an unknown handle previews nothing rather than
+    /// the whole board.
+    func testPagesForAnUnknownHandleIsEmpty() {
+        let pages = [makeWikiPage("가", status: "진행중", assignee: "minsuRob")]
+
+        XCTAssertEqual(WikiWorkload.pages(in: pages, handle: "", limit: 5), [])
+    }
 }

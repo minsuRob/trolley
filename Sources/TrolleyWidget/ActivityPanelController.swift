@@ -135,6 +135,13 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         didSet { wikiButton.isHidden = onOpenWiki == nil }
     }
 
+    /// A title in the 내 일감 preview below `wikiButton` was clicked. Nil hides the whole
+    /// preview, the same rule `onOpenWiki` follows for the button above it -- a title that
+    /// does nothing when pressed is worse than no preview at all.
+    var onOpenWikiPage: ((WikiPage) -> Void)? {
+        didSet { applyWikiListVisibility() }
+    }
+
     private let panel: NSPanel
     private let widgetPanel: NSPanel
     private let stack = NSStackView()
@@ -185,6 +192,17 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
     private let settingsButton = PanelButton()
     private let wikiButton = NSButton()
     private let updateButton = NSButton()
+
+    /// Same control as `callsToggle`, one row up: 내 일감, collapsed by default for the
+    /// same reason -- the panel opens to ask something, not to read a queue.
+    private let wikiListToggle = PanelButton()
+    private let wikiListStack = NSStackView()
+    private var isWikiListOpen = false
+    /// What the open rows are built from, so a tapped row can be turned back into the
+    /// `WikiPage` `onOpenWikiPage` wants -- a button only carries the tag it was given.
+    private var wikiPages: [WikiPage] = []
+    /// The toggle's own text, held so it can recompose without waiting for `showWiki`.
+    private var wikiListText = ""
 
     private let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -336,10 +354,24 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
     ///   here, and nothing about a missing folder can be done from this panel.
     /// - Parameter myCount: nil when no 담당 handle has been learned yet. See
     ///   `WikiButtonCopy` for why that is not 0.
-    func showWiki(available: Bool, myCount: Int?) {
+    /// - Parameter myPages: titles for the preview below the button, already capped by
+    ///   the caller (`WikiWorkload.myPages`) -- this only decides whether to show them.
+    func showWiki(available: Bool, myCount: Int?, myPages: [WikiPage] = []) {
         wikiButton.isHidden = onOpenWiki == nil || !available
         wikiButton.title = WikiButtonCopy.title(myCount: myCount)
         wikiButton.toolTip = WikiButtonCopy.tooltip(myCount: myCount)
+
+        wikiPages = available ? myPages : []
+        wikiListText = myCount.map { "내 일감 \($0)건" } ?? "내 일감"
+        replaceRows(
+            of: wikiListStack,
+            with: wikiPages.enumerated().map { wikiRow($0.offset, $0.element) }
+        )
+        applyWikiListVisibility()
+        // The toggle's own visibility can change here (a first count arriving, or the
+        // last page closing out from under an open preview), which changes the stack's
+        // height the same way an open/close of it does.
+        resizeToFit()
     }
 
     /// Retitles the button from the status. A finished download turns it into
@@ -452,6 +484,15 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         leading.setContentHuggingPriority(.defaultLow, for: .horizontal)
         leading.widthAnchor.constraint(equalToConstant: Self.contentWidth).isActive = true
         stack.addArrangedSubview(leading)
+
+        buildWikiListToggle()
+        stack.addArrangedSubview(wikiListToggle)
+        wikiListStack.orientation = .vertical
+        wikiListStack.alignment = .leading
+        wikiListStack.spacing = 2
+        stack.addArrangedSubview(wikiListStack)
+        applyWikiListVisibility()
+
         buildCallsToggle()
         stack.addArrangedSubview(callsToggle)
 
@@ -619,6 +660,74 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         transcriptStack.spacing = 3
         transcriptStack.isHidden = true
         stack.addArrangedSubview(transcriptStack)
+    }
+
+    /// 내 일감, titles only, closed by default -- see `buildCallsToggle` just below for
+    /// the layout and the deferred-click reasoning this copies wholesale.
+    private func buildWikiListToggle() {
+        wikiListToggle.isBordered = false
+        wikiListToggle.bezelStyle = .inline
+        wikiListToggle.font = Style.body
+        wikiListToggle.imagePosition = .imageTrailing
+        wikiListToggle.contentTintColor = .secondaryLabelColor
+        wikiListToggle.target = self
+        wikiListToggle.action = #selector(toggleWikiList)
+        wikiListToggle.setContentHuggingPriority(.required, for: .horizontal)
+    }
+
+    @objc private func toggleWikiList() {
+        // Deferred for the same reason `toggleCalls` is -- a click delivered through the
+        // accessibility API arrives while the accessibility thread holds the view
+        // hierarchy lock, and laying out rows from inside that window deadlocks the app.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.isWikiListOpen.toggle()
+            self.applyWikiListVisibility()
+            self.resizeToFit()
+        }
+    }
+
+    /// Same shape as `applyCallsVisibility`: the toggle, whether there is anything to
+    /// preview, and `replaceRows`, which hides an empty stack on its own.
+    private func applyWikiListVisibility() {
+        let hasPages = !wikiPages.isEmpty
+        wikiListToggle.isHidden = onOpenWikiPage == nil || !hasPages
+        wikiListStack.isHidden = !isWikiListOpen || !hasPages
+
+        let title = isWikiListOpen ? "내 일감 접기" : "내 일감 펼치기"
+        let chevron = NSImage(
+            systemSymbolName: isWikiListOpen ? "chevron.up" : "chevron.down",
+            accessibilityDescription: title
+        )
+        wikiListToggle.image = chevron
+        wikiListToggle.title = chevron == nil
+            ? wikiListText + (isWikiListOpen ? " ▴" : " ▾")
+            : wikiListText
+        wikiListToggle.toolTip = title
+    }
+
+    /// One title, clickable. The row's only state is `sender.tag`, an index into
+    /// `wikiPages` -- an `NSButton` carries no closure of its own.
+    private func wikiRow(_ index: Int, _ page: WikiPage) -> NSView {
+        let button = PanelButton()
+        button.isBordered = false
+        button.bezelStyle = .inline
+        button.font = Style.body
+        button.contentTintColor = .labelColor
+        button.alignment = .left
+        button.title = page.basename
+        button.toolTip = page.basename
+        button.tag = index
+        button.target = self
+        button.action = #selector(wikiRowTapped(_:))
+        button.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        button.widthAnchor.constraint(equalToConstant: Self.contentWidth).isActive = true
+        return button
+    }
+
+    @objc private func wikiRowTapped(_ sender: NSButton) {
+        guard wikiPages.indices.contains(sender.tag) else { return }
+        onOpenWikiPage?(wikiPages[sender.tag])
     }
 
     /// The counters double as the call list's disclosure control.

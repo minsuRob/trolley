@@ -31,6 +31,12 @@ public enum WikiSettings {
     public static let filterKey = "trolley.wiki.filter"
     public static let budgetKey = "trolley.wiki.budgetCharacters"
 
+    /// Posted after `rootPath` or `me` changes. What reads either -- chiefly the panel's
+    /// 내 일감 count and preview -- is otherwise gated behind its own throttle, so a
+    /// folder switched in the settings window would sit stale until the next tool call
+    /// happened to run one down.
+    public static let didChangeNotification = Notification.Name("WikiSettings.didChange")
+
     /// The wiki window's three toolbar dropdowns, remembered.
     ///
     /// Deliberately not folded into `filter`. That one is the *stored* filter -- what
@@ -74,6 +80,7 @@ public enum WikiSettings {
             // The verdict on whether the old folder was a wiki must not survive it:
             // `rootIsReadable` is what decides the window opens at all.
             invalidateRootProbe()
+            NotificationCenter.default.post(name: didChangeNotification, object: nil)
         }
     }
 
@@ -271,6 +278,7 @@ public enum WikiSettings {
             } else {
                 defaults.set(cleaned, forKey: meKey)
             }
+            NotificationCenter.default.post(name: didChangeNotification, object: nil)
         }
     }
 

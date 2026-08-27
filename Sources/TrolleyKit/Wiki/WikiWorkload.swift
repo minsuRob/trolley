@@ -2,11 +2,11 @@ import Foundation
 
 /// How much of the vault is waiting on you.
 ///
-/// One number, and the one definition of what it counts. The options window has had a
-/// 「내 일감」 preset since before this file -- 담당=나 · 진행중·대기 · 제목만, applied by
-/// `applyMyWorkPreset` -- and a button that says a count while that preset shows a list
-/// of a different length would make one of the two a liar. So the three axes live here
-/// and both sides read them from the same place.
+/// One definition of what counts as 내 일감, read by every place that says a number or a
+/// title for it. The options window has had a 「내 일감」 preset since before this file --
+/// 담당=나 · 진행중·대기 · 제목만, applied by `applyMyWorkPreset` -- and a button that says
+/// a count while that preset shows a list of a different length would make one of the two
+/// a liar. So the three axes live here and every side reads them from the same place.
 public enum WikiWorkload {
     /// 담당=나 · 진행중·대기, over the folders the index actually walks.
     ///
@@ -35,6 +35,19 @@ public enum WikiWorkload {
         return pages.filter(filter.matches).count
     }
 
+    /// Up to `limit` of the pages `count` counts, in the vault's own order (`.board`,
+    /// same as `INDEX.md`). Pure, so a test never needs a vault -- same reason `count` is.
+    ///
+    /// Goes through `apply` rather than `matches`, unlike `count`: a preview is exactly
+    /// the place a cap belongs, where `count` bypasses one to avoid silently capping the
+    /// number itself at `WikiFilter`'s default 40.
+    public static func pages(in pages: [WikiPage], handle: String, limit: Int) -> [WikiPage] {
+        guard !handle.isEmpty else { return [] }
+        var filter = myWorkFilter(handle: handle)
+        filter.maxCount = limit
+        return filter.apply(to: pages).kept
+    }
+
     /// The count for whoever `WikiSettings.me` names, or nil when there is nobody to
     /// count for -- no handle learned yet, or no readable vault.
     ///
@@ -53,5 +66,17 @@ public enum WikiWorkload {
               let snapshot = try? WikiIndex.shared.snapshot(root: root)
         else { return nil }
         return count(in: snapshot.pages, handle: handle)
+    }
+
+    /// Up to `limit` of the pages `myCount` counts. Same disk-touching rule as `myCount`
+    /// -- never call this on the main thread.
+    public static func myPages(limit: Int) -> [WikiPage] {
+        let handle = WikiSettings.me
+        guard !handle.isEmpty,
+              WikiSettings.rootIsReadable,
+              let root = WikiSettings.rootURL,
+              let snapshot = try? WikiIndex.shared.snapshot(root: root)
+        else { return [] }
+        return pages(in: snapshot.pages, handle: handle, limit: limit)
     }
 }

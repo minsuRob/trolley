@@ -698,9 +698,26 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
 
     // MARK: - The page
 
+    /// Opens the window already showing `page`, whatever the toolbar's filters would
+    /// otherwise include -- used by the panel's 내 일감 preview, which can name a page
+    /// the window's own stored filter would hide.
+    ///
+    /// Renders immediately from `page` itself rather than waiting on `reloadList`'s walk:
+    /// `openPage(at:)` already reads a page's body straight from `page.path`, never from
+    /// the snapshot, so nothing here needs the walk to have finished. If the walk later
+    /// turns up this same path, `restoreSelection` -- which reads the `openPage` this
+    /// sets -- highlights it in the list on its own.
+    func open(_ page: WikiPage) {
+        show()
+        present(page)
+    }
+
     private func openPage(at row: Int) {
         guard pages.indices.contains(row) else { return }
-        let page = pages[row]
+        present(pages[row])
+    }
+
+    private func present(_ page: WikiPage) {
         guard page.path != openPage?.path else { return }
         openPage = page
         titleLabel.stringValue = page.basename

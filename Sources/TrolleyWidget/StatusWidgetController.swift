@@ -66,6 +66,9 @@ public final class StatusWidgetController {
     /// window's wiki and LLM probes -- the number moves when someone edits a page, which
     /// is not something worth re-walking a folder for on every tool call.
     private static let wikiCheckInterval: TimeInterval = 5
+    /// How many titles the panel's 내 일감 preview shows. The button's own count is
+    /// never capped -- only the list under it is.
+    private static let wikiPreviewCount = 5
 
     private let panel: WidgetPanel
     private let iconView: WidgetContentView
@@ -103,6 +106,12 @@ public final class StatusWidgetController {
             // waits for the throttle like everything else that touches that folder.
             refreshWikiButtonIfDue()
         }
+    }
+
+    /// Opens the wiki window to a specific page, for the panel's 내 일감 preview. Same
+    /// arrangement as `onOpenWiki`, one level deeper.
+    public var onOpenWikiPage: ((WikiPage) -> Void)? {
+        didSet { activityPanel.onOpenWikiPage = onOpenWikiPage }
     }
 
     /// When the vault was last counted, and whether a count is in the air. Same shape as
@@ -195,6 +204,12 @@ public final class StatusWidgetController {
             object: nil,
             queue: .main
         ) { [weak self] _ in self?.reassertVisibility() }
+
+        NotificationCenter.default.addObserver(
+            forName: WikiSettings.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in self?.forceWikiButtonRefresh() }
     }
 
     /// The bridge handed to the tool runner. Fires off the main thread.
@@ -468,6 +483,19 @@ public final class StatusWidgetController {
     ///
     /// The throttle is what makes this safe to call from `apply(_:)`, which fires on
     /// every single tool call.
+    /// Drops the throttle and recounts now -- for when the folder or 담당 changed out
+    /// from under the last count, not merely when time has passed.
+    ///
+    /// A tool call is not the only reason 내 일감 can be wrong: the settings window's
+    /// 저장 can point `rootPath` at a different folder, and the wiki window's own toolbar
+    /// can hand `WikiSettings.me` a different handle, and neither of those is a tool
+    /// call. Without this the button and the panel's preview would sit on the old
+    /// folder's numbers until something else happened to run the throttle down.
+    private func forceWikiButtonRefresh() {
+        lastWikiCheck = nil
+        refreshWikiButtonIfDue()
+    }
+
     private func refreshWikiButtonIfDue() {
         guard onOpenWiki != nil, !wikiCheckInFlight else { return }
         if let last = lastWikiCheck, Date().timeIntervalSince(last) < Self.wikiCheckInterval {
@@ -480,10 +508,12 @@ public final class StatusWidgetController {
             // Nil for "no handle learned yet" as well as for "no vault"; the button only
             // needs to know it has no number to show.
             let count = available ? WikiWorkload.myCount() : nil
+            // Same rule as `count`: no pages to preview without a vault or a handle.
+            let pages = available ? WikiWorkload.myPages(limit: Self.wikiPreviewCount) : []
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.wikiCheckInFlight = false
-                self.activityPanel.showWiki(available: available, myCount: count)
+                self.activityPanel.showWiki(available: available, myCount: count, myPages: pages)
             }
         }
     }
