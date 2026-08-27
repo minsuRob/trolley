@@ -38,9 +38,6 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     /// Opens the prompt box. Set by `WelcomeFlow`; the ready screen's button is
     /// hidden without it, since a button that does nothing is worse than none.
     var onAsk: (() -> Void)?
-    /// Opens the wiki window. Set by `WelcomeFlow` for the same reason `onAsk` is: this
-    /// window does not own that one, and only one place in the app may.
-    var onOpenWiki: (() -> Void)?
     /// Fired the first time this window sees everything go green. `WelcomeFlow`
     /// uses it to introduce the prompt box once.
     var onBecameReady: (() -> Void)?
@@ -459,17 +456,18 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     /// Grey rather than orange when it is missing, and it always was: trolley automates
     /// apps with or without a vault. What changed is what green *means*. It used to say
     /// "this is riding along with your questions"; it now says "there is a wiki here to
-    /// open", and the button opens it.
+    /// open" — opened from the widget panel's "위키 열기(N개)" button, not from a second
+    /// button here.
     private func refreshWikiRow() {
         checkWikiIfDue()
         let readable = wikiState == .done
         wikiRow.update(
             state: wikiState,
             detail: wikiSummary ?? "확인 중…",
-            button: readable ? "위키 열기" : "폴더 지정",
-            action: { [weak self] in
-                readable ? self?.onOpenWiki?() : self?.wikiSettings.show()
-            }
+            // Readable 이면 열 곳은 이미 패널의 "위키 열기(N개)" 버튼이다 — 여기서
+            // 또 하나를 그리면 같은 동작이 화면에 두 번 뜬다.
+            button: readable ? nil : "폴더 지정",
+            action: readable ? nil : { [weak self] in self?.wikiSettings.show() }
         )
     }
 

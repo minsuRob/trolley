@@ -207,7 +207,6 @@ enum WelcomeFlow {
         if setup == nil {
             let controller = SetupWindowController(launchedAt: launchedAt)
             controller.onAsk = { widget?.presentPromptPanel(focus: true) }
-            controller.onOpenWiki = { openWiki() }
             // The other place the transition is seen: the window is open exactly
             // when something still needs granting, so it always witnesses the
             // moment the last dot turns green.
@@ -217,7 +216,7 @@ enum WelcomeFlow {
         setup?.show()
     }
 
-    /// The wiki window, opened from the menu bar or from the setup window's row.
+    /// The wiki window, opened from the menu bar or the widget panel's 위키 열기 button.
     ///
     /// Held for the life of the app for the same reason `setup` is, plus one of its own:
     /// this window owns a conversation and possibly a generation in flight, and building
