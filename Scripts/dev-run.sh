@@ -16,15 +16,57 @@ cd "$(dirname "$0")/.."
 
 CONFIG=debug
 KILL_RUNNING=0
+SIGNED=0
 for arg in "$@"; do
     case "$arg" in
         --release) CONFIG=release ;;
         # 설치본과 identifier 가 같으므로 나란히 뜬다. 메뉴 막대 아이콘 두 개와 폴더
         # 두 개를 헷갈리지 않으려면 이쪽.
         --replace) KILL_RUNNING=1 ;;
+        # 권한이 걸린 것을 확인할 때. 아래 do_signed 참고.
+        --signed) SIGNED=1 ;;
         *) echo "error: 모르는 옵션 $arg" >&2; exit 1 ;;
     esac
 done
+
+# 권한 팝업이 매번 새로 뜨는 이유, 그리고 이 경로가 있는 이유.
+#
+# swift build 는 애드혹으로 서명한다(TeamIdentifier 없음). 손쉬운 사용·화면 기록·데스크탑
+# 접근은 전부 서명에 묶이고 애드혹 서명의 cdhash 는 빌드마다 바뀌므로, macOS 는 매번
+# 처음 보는 앱으로 취급한다 -- 허락은 저장돼도 다음 빌드가 그것을 물려받지 못한다.
+# 게다가 trolley 는 .accessory 라 그 동의 창이 앞으로 나오지 않을 때가 있고, 그러면
+# 폴더를 여는 open() 이 아무 말 없이 막힌 채로 남는다(실측: 위키 순회 스레드 3개가
+# 그 상태로 멈춰 있었다).
+#
+# Developer ID 로 서명하면 사라진다. 허락이 (번들 id + 팀 id) 에 묶이는데 그 둘이
+# 설치본과 같으므로, 이미 허락해 둔 것을 그대로 물려받고 다시 빌드해도 유지된다.
+# 대신 유니버설 릴리스 빌드와 SSM 서명 자산이 필요해서 몇 분 걸린다 -- 권한이 걸린
+# 것을 볼 때만 쓰고, 나머지는 기본 경로가 빠르다.
+do_signed() {
+    echo "==> 서명 빌드 (공증 생략)"
+    ./Scripts/build-installer.sh --skip-notarize
+    # 조립 디렉터리(dist/dmgroot)는 build-installer 가 끝나면서 지운다. 서명된 번들이
+    # 남는 곳은 zip 안이다 -- `trolley update` 가 받아가는 바로 그 자산.
+    #
+    # unzip 이 아니라 ditto: 확장 속성과 서명을 그대로 옮기는 쪽이고, unzip 으로 푼
+    # 번들은 서명 검증에서 떨어질 수 있다.
+    SIGNED_DIR=.build/signed
+    rm -rf "$SIGNED_DIR"
+    mkdir -p "$SIGNED_DIR"
+    ditto -xk dist/trolley-app.zip "$SIGNED_DIR"
+    APP="$SIGNED_DIR/trolley.app"
+    [ -d "$APP" ] || { echo "error: $APP 가 없습니다." >&2; exit 1; }
+    codesign --verify --strict "$APP" || { echo "error: 서명 검증 실패" >&2; exit 1; }
+    if [ "$KILL_RUNNING" = "1" ]; then
+        pkill -x trolley || true
+        while pgrep -x trolley >/dev/null; do sleep 0.2; done
+    fi
+    echo "==> 실행: $APP (서명 · 설치본과 같은 권한)"
+    # /Applications 는 건드리지 않는다. 서명이 같으므로 여기서 떠도 허락은 그대로다.
+    open -n "$APP"
+    exit 0
+}
+[ "$SIGNED" = "1" ] && do_signed
 
 VERSION=$(sed -n 's/.*public static let current = "\([^"]*\)".*/\1/p' Sources/TrolleyKit/Version.swift)
 COMMIT="dev-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
