@@ -87,6 +87,45 @@ final class WikiWindowTests: XCTestCase {
         XCTAssertEqual(filter.statuses, ["완료"])
     }
 
+    // MARK: - Where the divider lands
+
+    /// The number this change exists to delete: the list used to be 360 points wide,
+    /// forever, and 담당 was whatever fell off the end of that.
+    func testAnUntouchedDividerOpensWideEnoughForTheHandleColumn() {
+        let width = WikiWindowController.listWidth(stored: nil, available: 900)
+        XCTAssertEqual(width, WikiWindowController.defaultListWidth)
+        XCTAssertGreaterThan(width, 360)
+    }
+
+    func testADraggedDividerIsGivenBack() {
+        XCTAssertEqual(WikiWindowController.listWidth(stored: 520, available: 900), 520)
+    }
+
+    /// A width dragged wide on a big screen, reopened on a small one. Handing it back
+    /// whole would leave the page a sliver.
+    func testAStoredWidthIsClampedToWhatTheWindowCanHold() {
+        XCTAssertEqual(
+            WikiWindowController.listWidth(stored: 800, available: 900),
+            900 - WikiWindowController.minimumPageWidth
+        )
+        XCTAssertEqual(
+            WikiWindowController.listWidth(stored: 40, available: 900),
+            WikiWindowController.minimumListWidth
+        )
+    }
+
+    /// Both minimums cannot hold. Clamping to the list's would push the page to zero,
+    /// so what is left gets shared instead.
+    func testTooNarrowForBothMinimumsSplitsTheDifference() {
+        let available: CGFloat = 400
+        XCTAssertLessThan(
+            available,
+            WikiWindowController.minimumListWidth + WikiWindowController.minimumPageWidth
+        )
+        XCTAssertEqual(WikiWindowController.listWidth(stored: 380, available: available), 200)
+        XCTAssertEqual(WikiWindowController.listWidth(stored: nil, available: 0), 0)
+    }
+
     /// A folder that has left the vault, or a 상태 this build no longer offers. Selecting
     /// nothing leaves a popup that reads as 전체 while filtering by something else.
     func testAStoredValueThatNoLongerExistsFallsBackToAll() {
@@ -154,11 +193,29 @@ final class WikiWindowSettingsTests: XCTestCase {
         }
     }
 
+    /// Never dragged has to stay distinguishable from dragged to nothing -- and a stored
+    /// zero is what a split view reports while the window is still being built.
+    func testTheListWidthKeyIgnoresZeroAndKeepsARealDrag() {
+        withWindowKeys {
+            XCTAssertNil(WikiSettings.windowListWidth)
+
+            WikiSettings.windowListWidth = 480
+            XCTAssertEqual(WikiSettings.windowListWidth, 480)
+
+            WikiSettings.windowListWidth = 0
+            XCTAssertNil(WikiSettings.windowListWidth)
+
+            WikiSettings.windowListWidth = 480
+            WikiSettings.windowListWidth = nil
+            XCTAssertNil(WikiSettings.windowListWidth)
+        }
+    }
+
     private func withWindowKeys(_ body: () -> Void) {
         let defaults = UserDefaults.standard
         let keys = [
             WikiSettings.windowAssigneeKey, WikiSettings.windowFolderKey,
-            WikiSettings.windowStatusKey
+            WikiSettings.windowStatusKey, WikiSettings.windowListWidthKey
         ]
         let saved = keys.map { ($0, defaults.object(forKey: $0)) }
         keys.forEach { defaults.removeObject(forKey: $0) }

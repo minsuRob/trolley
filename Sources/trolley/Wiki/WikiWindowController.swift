@@ -35,6 +35,24 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
     private let tableScroll = NSScrollView()
     private let countLabel = NSTextField(labelWithString: "")
 
+    /// Guards `layoutColumns` against the resize notification its own writes raise.
+    private var isLayingOutColumns = false
+    /// Whether the stored divider position has been read yet. Nothing may be written
+    /// before it has: the split view lays out once with its default position while the
+    /// window is coming up, and that layout used to store 400 over the width someone
+    /// dragged yesterday -- which `restoreListWidth` then dutifully read back.
+    private var hasRestoredListWidth = false
+
+    /// The list and the page, and the divider between them.
+    ///
+    /// A split view rather than two columns of a stack because the list's width was a
+    /// number in this file: 360 points, chosen once, and 담당 fell off the right edge of
+    /// it the moment a handle was longer than the leftovers. Whoever is reading decides
+    /// now, by dragging.
+    private let columns = NSSplitView()
+    private let listPane = NSView()
+    private let pagePane = NSView()
+
     private let titleLabel = NSTextField(labelWithString: "")
     private let metaLabel = NSTextField(labelWithString: "")
     private let bodyText = NSTextView()
@@ -89,6 +107,12 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
         // Same reason as the other two: an NSWindow that releases itself on close leaves
         // this controller holding freed memory, and reopening then takes the app down.
         window.isReleasedWhenClosed = false
+        // Both panes at their minimums, plus the margins around them. Narrower than this
+        // there is nothing left to divide -- `enforceMinimums` takes the list's width
+        // away first, and below this floor even that has run out.
+        window.contentMinSize = NSSize(
+            width: Self.minimumListWidth + Self.minimumPageWidth + 30, height: 420
+        )
         window.delegate = self
         window.center()
         window.contentView = makeContentView()
@@ -105,6 +129,7 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
         restoreToolbar()
         reloadList()
         window.makeKeyAndOrderFront(nil)
+        restoreListWidth()
         NSApp.activate(ignoringOtherApps: true)
         window.makeFirstResponder(searchField)
     }
@@ -152,26 +177,75 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
         table.delegate = self
         table.target = self
         table.doubleAction = #selector(focusPrompt)
-        for (identifier, title, width) in [
-            ("title", "제목", CGFloat(210)), ("status", "상태", 56), ("assignee", "담당", 76)
+        // Widths a person can drag, and the widths they leave behind. `autosaveName` does
+        // the remembering; `layoutColumns` does the arithmetic, which is why none of
+        // AppKit's own autoresizing styles is on: they either spread every extra point
+        // over all three columns or let the total run wider than what is on screen --
+        // and a total wider than the clip view is exactly how 담당 came to be half off
+        // the right edge.
+        table.columnAutoresizingStyle = .noColumnAutoresizing
+        // The order is the reading order -- 제목 first, and the two narrow facts after
+        // it. Dragging a header sideways only ever produced a list with 상태 in front of
+        // the title, which is nobody's intent while reaching for the divider beside it.
+        table.allowsColumnReordering = false
+        for (identifier, title, width, minimum, maximum) in [
+            // 제목 is the filler: not draggable, because it is whatever the other two
+            // leave behind. Dragging it could only mean taking room from itself.
+            ("title", "제목", CGFloat(180), CGFloat(90), CGFloat(4_000)),
+            ("status", "상태", 56, 44, 160),
+            // 담당 holds a handle, and 76 fit eight characters only when nothing else
+            // spilled. The default fits `minsuRob`; longer handles are a drag away.
+            ("assignee", "담당", 96, 56, 320)
         ] {
             let column = NSTableColumn(identifier: .init(identifier))
             column.title = title
             column.width = width
+            column.minWidth = minimum
+            column.maxWidth = maximum
+            column.resizingMask = identifier == "title" ? [] : [.userResizingMask]
             table.addTableColumn(column)
         }
+        // After the columns exist, never before: `autosaveName` restores widths for the
+        // columns the table holds at the moment it is set, and a table that holds none
+        // yet restores nothing -- then saves its defaults over what was stored, which is
+        // how a dragged 담당 came back at 96 points every launch.
+        table.autosaveName = "trolley.wiki.list"
+        table.autosaveTableColumns = true
         tableScroll.documentView = table
         tableScroll.hasVerticalScroller = true
+        // Only reachable by dragging 상태 or 담당 wider than the pane, which is a
+        // deliberate act -- but a table drawn wider than its clip view with no way to
+        // reach the rest is the same complaint this change started from.
+        tableScroll.hasHorizontalScroller = true
+        tableScroll.autohidesScrollers = true
         tableScroll.borderType = .bezelBorder
         tableScroll.translatesAutoresizingMaskIntoConstraints = false
-        tableScroll.widthAnchor.constraint(equalToConstant: 360).isActive = true
+        // Every way the list's width can change ends here: the divider dragged, the
+        // window resized, the first layout pass after the window opens. Watching the
+        // clip view rather than the split view is what makes the last one land -- the
+        // divider is put in place before the pane has been given its width, and a
+        // `layoutColumns` from there measured a list 100 points narrower than the one
+        // that appeared a moment later.
+        tableScroll.contentView.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(listWidthChanged),
+            name: NSView.frameDidChangeNotification, object: tableScroll.contentView
+        )
 
         countLabel.font = .systemFont(ofSize: 10)
         countLabel.textColor = .secondaryLabelColor
-        let leftColumn = NSStackView(views: [tableScroll, countLabel])
-        leftColumn.orientation = .vertical
-        leftColumn.alignment = .leading
-        leftColumn.spacing = 4
+        countLabel.translatesAutoresizingMaskIntoConstraints = false
+        listPane.addSubview(tableScroll)
+        listPane.addSubview(countLabel)
+        NSLayoutConstraint.activate([
+            tableScroll.topAnchor.constraint(equalTo: listPane.topAnchor),
+            tableScroll.leadingAnchor.constraint(equalTo: listPane.leadingAnchor),
+            tableScroll.trailingAnchor.constraint(equalTo: listPane.trailingAnchor),
+            countLabel.topAnchor.constraint(equalTo: tableScroll.bottomAnchor, constant: 4),
+            countLabel.leadingAnchor.constraint(equalTo: listPane.leadingAnchor),
+            countLabel.trailingAnchor.constraint(lessThanOrEqualTo: listPane.trailingAnchor),
+            countLabel.bottomAnchor.constraint(equalTo: listPane.bottomAnchor)
+        ])
 
         // -- right: the page
         titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
@@ -187,16 +261,34 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
         bodyScroll.borderType = .bezelBorder
         bodyScroll.translatesAutoresizingMaskIntoConstraints = false
 
-        let rightColumn = NSStackView(views: [titleLabel, metaLabel, bodyScroll])
-        rightColumn.orientation = .vertical
-        rightColumn.alignment = .leading
-        rightColumn.spacing = 4
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        metaLabel.translatesAutoresizingMaskIntoConstraints = false
+        pagePane.addSubview(titleLabel)
+        pagePane.addSubview(metaLabel)
+        pagePane.addSubview(bodyScroll)
+        NSLayoutConstraint.activate([
+            titleLabel.topAnchor.constraint(equalTo: pagePane.topAnchor),
+            titleLabel.leadingAnchor.constraint(equalTo: pagePane.leadingAnchor, constant: 12),
+            titleLabel.trailingAnchor.constraint(equalTo: pagePane.trailingAnchor),
+            metaLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
+            metaLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            metaLabel.trailingAnchor.constraint(equalTo: pagePane.trailingAnchor),
+            bodyScroll.topAnchor.constraint(equalTo: metaLabel.bottomAnchor, constant: 4),
+            bodyScroll.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            bodyScroll.trailingAnchor.constraint(equalTo: pagePane.trailingAnchor),
+            bodyScroll.bottomAnchor.constraint(equalTo: pagePane.bottomAnchor)
+        ])
 
-        let columns = NSStackView(views: [leftColumn, rightColumn])
-        columns.orientation = .horizontal
-        columns.alignment = .top
-        columns.spacing = 12
-        columns.distribution = .fill
+        columns.isVertical = true
+        columns.dividerStyle = .thin
+        columns.delegate = self
+        columns.translatesAutoresizingMaskIntoConstraints = false
+        columns.addArrangedSubview(listPane)
+        columns.addArrangedSubview(pagePane)
+        // The split view is what takes the room a taller window makes; the toolbar and
+        // the prompt box below keep the heights they asked for.
+        columns.setContentHuggingPriority(.init(1), for: .vertical)
+        columns.setContentCompressionResistancePriority(.init(1), for: .vertical)
 
         // -- bottom: the prompt
         promptField.placeholderString = "이 문서에 대해 물어보세요…"
@@ -251,10 +343,7 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
             promptField.widthAnchor.constraint(equalTo: bottom.widthAnchor),
             statusRow.widthAnchor.constraint(equalTo: bottom.widthAnchor),
             answerScroll.widthAnchor.constraint(equalTo: bottom.widthAnchor),
-            rightColumn.widthAnchor.constraint(greaterThanOrEqualToConstant: 380),
-            bodyScroll.widthAnchor.constraint(equalTo: rightColumn.widthAnchor),
-            bodyScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 300),
-            tableScroll.heightAnchor.constraint(equalTo: bodyScroll.heightAnchor)
+            columns.heightAnchor.constraint(greaterThanOrEqualToConstant: 320)
         ])
         return container
     }
@@ -318,6 +407,97 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
             return nil
         }
         return title == Self.noAssignee ? "" : title
+    }
+
+    // MARK: - The divider, remembered
+
+    /// Room the list never drops below, whatever the divider is dragged to. Under this
+    /// the three columns stop being a table and start being a stack of ellipses.
+    static let minimumListWidth: CGFloat = 240
+    /// The same for the page. A markdown body narrower than this wraps every line twice.
+    static let minimumPageWidth: CGFloat = 320
+    /// Where the divider sits the first time, before anyone has dragged it: wide enough
+    /// for 제목 plus 상태 plus a handle in 담당, which the old fixed 360 was not.
+    static let defaultListWidth: CGFloat = 400
+
+    /// Where the divider goes for a given window width.
+    ///
+    /// Pure because the case that matters is the one nobody drags into on purpose: a
+    /// window narrowed until both minimums cannot hold. Clamping to the list's minimum
+    /// there would push the page to nothing, so the two share what is left instead --
+    /// a cramped page still shows a paragraph, a page of zero width shows the divider.
+    static func listWidth(stored: Double?, available: CGFloat) -> CGFloat {
+        let wanted = stored.map { CGFloat($0) } ?? defaultListWidth
+        let ceiling = available - minimumPageWidth
+        guard ceiling > minimumListWidth else { return max(available / 2, 0) }
+        return min(max(wanted, minimumListWidth), ceiling)
+    }
+
+    /// Puts the divider back where it was left. Idempotent, so calling it on every open
+    /// costs nothing: the stored width is the width it already has.
+    private func restoreListWidth() {
+        window.layoutIfNeeded()
+        let available = columns.bounds.width - columns.dividerThickness
+        guard available > 0 else { return }
+        columns.setPosition(
+            Self.listWidth(stored: WikiSettings.windowListWidth, available: available),
+            ofDividerAt: 0
+        )
+        hasRestoredListWidth = true
+    }
+
+    @objc private func listWidthChanged() { layoutColumns() }
+
+    /// Hands 제목 whatever 상태 and 담당 are not using.
+    ///
+    /// Called whenever either width could have moved -- the divider dragged, the window
+    /// resized, a column header dragged. The invariant it keeps is the one this whole
+    /// change is about: the three columns add up to what is on screen, so none of them
+    /// is drawn past the right edge of the list.
+    private func layoutColumns() {
+        guard !isLayingOutColumns,
+              let title = table.tableColumn(withIdentifier: .init("title"))
+        else { return }
+        let others = table.tableColumns.filter { $0 !== title }
+        let spacing = table.intercellSpacing.width * CGFloat(table.tableColumns.count)
+        let left = tableScroll.contentSize.width
+            - others.reduce(0) { $0 + $1.width }
+            - spacing
+        isLayingOutColumns = true
+        title.width = max(title.minWidth, left)
+        isLayingOutColumns = false
+    }
+
+    /// Keeps the page above its minimum when the *window* is what shrank.
+    ///
+    /// `constrainMinCoordinate` only governs the drag. A window dragged narrower resizes
+    /// the page alone -- that is the rule right below, and the right one while there is
+    /// room -- so without this the page is squeezed toward nothing while the list holds
+    /// a width nobody is defending. Reuses `listWidth`, so the window shrinking and the
+    /// window reopening land on the same number.
+    private func enforceMinimums() {
+        let available = columns.bounds.width - columns.dividerThickness
+        guard available > 0 else { return }
+        let current = listPane.frame.width
+        let clamped = Self.listWidth(stored: Double(current), available: available)
+        // Terminates: the second pass sees a width that is already clamped.
+        if abs(clamped - current) > 0.5 {
+            columns.setPosition(clamped, ofDividerAt: 0)
+        }
+    }
+
+    /// Written the moment the drag ends, like the three dropdowns above it -- no 저장
+    /// button, for the same reason.
+    ///
+    /// The guard is against writing during teardown and during the first pass, when the
+    /// split view has been laid out but not yet sized: a zero there would be stored as a
+    /// deliberate choice and the list would open collapsed forever after.
+    private func rememberListWidth() {
+        let available = columns.bounds.width - columns.dividerThickness
+        guard hasRestoredListWidth,
+              available >= Self.minimumListWidth + Self.minimumPageWidth
+        else { return }
+        WikiSettings.windowListWidth = Double(listPane.frame.width)
     }
 
     // MARK: - The toolbar, remembered
@@ -637,6 +817,36 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
     }
 }
 
+extension WikiWindowController: NSSplitViewDelegate {
+    func splitView(
+        _ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat,
+        ofSubviewAt dividerIndex: Int
+    ) -> CGFloat {
+        max(proposedMinimumPosition, Self.minimumListWidth)
+    }
+
+    func splitView(
+        _ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat,
+        ofSubviewAt dividerIndex: Int
+    ) -> CGFloat {
+        min(
+            proposedMaximumPosition,
+            splitView.bounds.width - splitView.dividerThickness - Self.minimumPageWidth
+        )
+    }
+
+    /// A wider window widens the page, not the list. The list is three columns and a
+    /// person sized them; the page is prose and always wants more.
+    func splitView(_ splitView: NSSplitView, shouldAdjustSizeOfSubview view: NSView) -> Bool {
+        view !== listPane
+    }
+
+    func splitViewDidResizeSubviews(_ notification: Notification) {
+        enforceMinimums()
+        rememberListWidth()
+    }
+}
+
 extension WikiWindowController: NSTableViewDataSource, NSTableViewDelegate {
     func numberOfRows(in tableView: NSTableView) -> Int { pages.count }
 
@@ -654,5 +864,11 @@ extension WikiWindowController: NSTableViewDataSource, NSTableViewDelegate {
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         openPage(at: table.selectedRow)
+    }
+
+    /// A header divider was dragged. 상태 and 담당 keep what they were given; 제목 gives
+    /// up or takes back the difference, so the total still fits.
+    func tableViewColumnDidResize(_ notification: Notification) {
+        layoutColumns()
     }
 }
