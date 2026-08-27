@@ -21,12 +21,8 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
     private let window: NSWindow
 
     private let pathField = NSTextField(labelWithString: "")
-    /// 끔 / 자동 / 직접 지정, as radio buttons rather than the single 위키 참고 checkbox
-    /// they replaced. Three states cannot be a checkbox, and the middle one is the
-    /// point: 자동 hands the filter below to trolley, which picks it per question.
-    private let modeButtons: [(mode: WikiSettings.Mode, button: NSButton)]
-    /// Says what 자동 means where the filter grid is, since that grid goes grey under it.
-    private let modeNote = NSTextField(labelWithString: "")
+    /// What the filter is for, now that it is not a switch on anything.
+    private let filterNote = NSTextField(labelWithString: "")
 
     private let typePopup = NSPopUpButton()
     private let categoryPopup = NSPopUpButton()
@@ -97,9 +93,6 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        modeButtons = WikiSettings.Mode.allCases.map {
-            ($0, NSButton(radioButtonWithTitle: $0.title, target: nil, action: nil))
-        }
         folderCheckboxes = Self.offerableFolders.map {
             ($0, NSButton(checkboxWithTitle: $0, target: nil, action: nil))
         }
@@ -173,20 +166,13 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
         pathRow.orientation = .horizontal
         pathRow.spacing = 8
 
-        for (_, button) in modeButtons {
-            button.target = self
-            button.action = #selector(modeChanged)
-            button.controlSize = .small
-        }
-        // One superview and one action is what makes AppKit treat them as a group, so
-        // picking one clears the others without any state kept here.
-        let modeRow = NSStackView(views: modeButtons.map(\.button))
-        modeRow.orientation = .horizontal
-        modeRow.spacing = 12
-
-        modeNote.font = .systemFont(ofSize: 10)
-        modeNote.textColor = .secondaryLabelColor
-        modeNote.lineBreakMode = .byTruncatingTail
+        filterNote.font = .systemFont(ofSize: 10)
+        filterNote.textColor = .secondaryLabelColor
+        filterNote.lineBreakMode = .byWordWrapping
+        filterNote.maximumNumberOfLines = 2
+        filterNote.stringValue =
+            "위키 창이 열릴 때 처음 보여줄 목록입니다. 창에서 그때그때 좁히는 것과 별개로, "
+            + "여기서 정한 것이 기본값이 됩니다."
 
         // Deliberately not an NSBox. `NSBox.contentView = someAutoLayoutView` does not
         // constrain what it is handed, so the options stack was left unpositioned and
@@ -229,8 +215,8 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
         rootStack.edgeInsets = NSEdgeInsets(top: 16, left: 18, bottom: 14, right: 18)
         rootStack.translatesAutoresizingMaskIntoConstraints = false
         for view in [
-            heading("위키 폴더"), pathRow, heading("참고 방식"), modeRow, modeNote,
-            heading("상세 옵션"), optionsView,
+            heading("위키 폴더"), pathRow,
+            heading("기본 목록"), filterNote, optionsView,
             heading("미리보기"), summaryLabel, previewScroll, buttonRow
         ] {
             rootStack.addArrangedSubview(view)
@@ -366,12 +352,6 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
         defer { isPopulating = false }
 
         pathField.stringValue = WikiSettings.rootPath
-        let mode = WikiSettings.mode
-        for (candidate, button) in modeButtons {
-            button.state = candidate == mode ? .on : .off
-        }
-        applyMode(mode)
-
         let filter = WikiSettings.filter
         select(typePopup, filter.types)
         select(categoryPopup, filter.categories)
@@ -527,41 +507,6 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
         refreshPreview()
     }
 
-    private func currentMode() -> WikiSettings.Mode {
-        modeButtons.first { $0.button.state == .on }?.mode ?? .off
-    }
-
-    /// Greys the filter grid for the two modes that do not read it.
-    ///
-    /// Disabled rather than hidden. The controls still hold what was set, and someone
-    /// switching back to 직접 지정 has to find their filter where they left it -- a grid
-    /// that vanishes and reappears reads as though the settings went with it. Greyed
-    /// also answers the question the window would otherwise raise: under 자동 these
-    /// values are not being ignored silently, they are visibly not in play.
-    private func applyMode(_ mode: WikiSettings.Mode) {
-        let editable = mode == .manual
-        let controls: [NSControl] = [
-            typePopup, categoryPopup, priorityPopup, areaField, assigneePopup,
-            searchField, detailPopup, sortPopup, limitField, budgetField, myWorkButton
-        ] + folderCheckboxes.map(\.button) + statusCheckboxes.map(\.button)
-        for control in controls { control.isEnabled = editable }
-
-        switch mode {
-        case .off:
-            modeNote.stringValue = "위키를 아예 보지 않습니다. 도구 목록에서도 빠집니다."
-        case .auto:
-            modeNote.stringValue =
-                "질문 앞에 붙는 목록은 없습니다. trolley 가 질문을 읽고 필요한 조건을 직접 골라 찾습니다."
-        case .manual:
-            modeNote.stringValue = "아래 필터로 뽑은 목록이 대화의 첫 질문 앞에 함께 갑니다."
-        }
-    }
-
-    @objc private func modeChanged() {
-        applyMode(currentMode())
-        controlChanged()
-    }
-
     @objc private func controlChanged() {
         guard !isPopulating else { return }
         // A deliberate pick replaces whatever the CLI had written, 전체 included.
@@ -598,7 +543,6 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
 
     @objc private func save() {
         WikiSettings.rootPath = pathField.stringValue
-        WikiSettings.mode = currentMode()
         WikiSettings.budgetCharacters = currentBudget()
         // Whoever you keep filtering to is who 내 일감 means. Learned from the pick rather
         // than asked for in a field of its own.
@@ -607,9 +551,6 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
             WikiSettings.me = handle
         }
         WikiSettings.filter = currentFilter()
-        // Different filters are different content, so a conversation that already holds
-        // the old list has to be handed the new one.
-        WikiSettings.clearSent()
         WikiIndex.shared.invalidate()
         WikiContext.shared.invalidate()
         if let root = WikiSettings.rootURL { WikiIndex.shared.prewarm(root: root) }
@@ -636,13 +577,11 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
             return
         }
         let root = URL(fileURLWithPath: path)
-        let mode = currentMode()
-        // Under 자동 the grid below is not what trolley reads, so previewing it would show
-        // a list nothing will ever send. What trolley does see, before it has narrowed
-        // anything, is the unfiltered `wiki_search` -- so that is what goes in the box.
-        let filter = mode == .auto
-            ? WikiTools.mapFilter(folders: Set(Self.offerableFolders))
-            : currentFilter()
+        // The grid, always. This used to preview the unfiltered `wiki_search` under 자동,
+        // because that was what trolley saw and the grid was not -- both halves of that
+        // are gone. What the grid describes now is the list the wiki window opens with,
+        // and this box shows exactly that.
+        let filter = currentFilter()
         let budget = currentBudget()
 
         let snapshot: WikiSnapshot
@@ -664,24 +603,12 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
             pages: snapshot.pages, filter: filter,
             rootName: root.lastPathComponent, budgetCharacters: budget
         )
-        // The number this window exists to show: what the filter costs the model. 96,000
-        // is the server's measured soft context limit, so the share of it is the honest
-        // unit -- characters alone mean nothing to someone choosing a checkbox.
-        let tokens = WikiDigestRenderer.approximateTokens(characters: digest.characters)
-        var summary = "\(digest.matched)/\(digest.total)건 · \(digest.characters)자"
-        switch mode {
-        case .auto:
-            // No budget line: nothing rides in front of the question under 자동, so the
-            // share-of-budget number would be measuring a cost that is not paid. What is
-            // paid is one tool result, and 4,000 characters is where that gets truncated.
-            summary = "trolley 가 조건 없이 찾을 때 보는 목록 — " + summary
-            summary += " · 도구 결과 한도의 \(Int((Double(digest.characters) / 4_000 * 100).rounded()))%"
-        case .manual:
-            summary += " · 예산의 \(Int((Double(digest.characters) / Double(budget) * 100).rounded()))%"
-            summary += " · 96K 컨텍스트의 \(String(format: "%.1f", Double(tokens) / 960))%"
-        case .off:
-            summary = "끔 — 지금은 어디에도 쓰이지 않습니다 · " + summary
-        }
+        // Counts, not context shares. The percentages this line used to carry -- of the
+        // budget, of the model's 96K, of the tool-result limit -- all measured what the
+        // filter would cost a question, and this filter no longer rides on one. It is the
+        // list a person opens the wiki window to, so what matters is how many pages are
+        // in it and how many were left out.
+        var summary = "위키 창이 열릴 때 보이는 목록 — \(digest.matched)/\(digest.total)건"
         if digest.wasTruncated {
             summary += "  ⚠︎ \(digest.total - digest.matched)건 생략"
         }

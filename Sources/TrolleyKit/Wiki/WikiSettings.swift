@@ -1,6 +1,11 @@
 import Foundation
 
-/// Where the wiki is, whether to use it, and how to filter it.
+/// Where the wiki is and how to filter it.
+///
+/// No longer *whether* to use it. The wiki used to ride in front of every question and
+/// sit in every question's tool list, so a switch had to exist; now it is reachable only
+/// from its own window, where opening it is the switch. What is left here is the folder,
+/// the filter that window starts from, and the numbers the CLI prints.
 ///
 /// Same shape as `LocalLLMSettings`: a namespace of static computed properties over
 /// `UserDefaults.standard`, keys under `trolley.`, and a value equal to the built-in
@@ -23,18 +28,18 @@ public enum WikiSettings {
     public static let fallbackRoot = "~/Desktop/workspace/MAKi/markhub-llm-wiki"
 
     public static let rootKey = "trolley.wiki.root"
-    public static let enabledKey = "trolley.wiki.enabled"
-    public static let modeKey = "trolley.wiki.mode"
     public static let filterKey = "trolley.wiki.filter"
     public static let budgetKey = "trolley.wiki.budgetCharacters"
-    public static let sentConversationKey = "trolley.wiki.sent.conversationID"
-    public static let sentHashKey = "trolley.wiki.sent.digestHash"
-    public static let sentCountKey = "trolley.wiki.sent.count"
 
-    /// How many times one conversation may be handed a refreshed digest before it is
-    /// told to start a new one. Without a cap, a wiki edited through a long session
-    /// drips a fresh 8KB block into the history on every change.
-    public static let refreshCap = 5
+    /// Written by builds that gated the wiki behind a switch. Named only so an upgrade
+    /// can clear them: an old bundle put back by `trolley update` would read `enabled`
+    /// again, and leaving a stale `false` there would turn its wiki off for reasons
+    /// nobody could see from this build.
+    static let retiredKeys = [
+        "trolley.wiki.enabled", "trolley.wiki.mode",
+        "trolley.wiki.sent.conversationID", "trolley.wiki.sent.digestHash",
+        "trolley.wiki.sent.count"
+    ]
 
     private static var defaults: UserDefaults { .standard }
 
@@ -53,10 +58,8 @@ public enum WikiSettings {
             } else {
                 defaults.set(cleaned, forKey: rootKey)
             }
-            // Pages from the previous checkout must not survive into the new one.
-            clearSent()
-            // And neither may the verdict on whether the previous one was a wiki --
-            // `mode` reads that, so a stale one decides on/off for the next two seconds.
+            // The verdict on whether the old folder was a wiki must not survive it:
+            // `rootIsReadable` is what decides the window opens at all.
             invalidateRootProbe()
         }
     }
@@ -70,9 +73,9 @@ public enum WikiSettings {
     // MARK: - A wiki that is simply there
 
     /// How long a look at the root is trusted for. Two seconds, matching the gate
-    /// `WikiIndex` puts in front of its walk, and for the same reason: `mode` reads this,
-    /// and `mode` is read on every send, on every tool-catalog build, and forty times a
-    /// minute by the setup window's repaint timer.
+    /// `WikiIndex` puts in front of its walk, and for the same reason: this is what the
+    /// setup row, the menu bar and the wiki window all ask, and the setup window asks it
+    /// forty times a minute from its repaint timer.
     private static let probeInterval: TimeInterval = 2.0
     private static let probeLock = NSLock()
     private static var probed: (path: String, readable: Bool, at: Date)?
@@ -104,7 +107,7 @@ public enum WikiSettings {
     /// Makes the next `rootIsReadable` look at the disk again. The root setter calls it;
     /// so does anything that has just changed what the disk would answer -- a folder
     /// picked through the panel is readable a moment after it was not, and waiting out
-    /// the memo would show 꺼짐 for two seconds after the grant.
+    /// the memo would leave the window shut for two seconds after the grant.
     public static func invalidateRootProbe() {
         probeLock.lock()
         probed = nil
@@ -125,96 +128,15 @@ public enum WikiSettings {
         return manager.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
     }
 
-    /// Who decides what the wiki contributes to a question.
+    /// Clears settings only older builds understood.
     ///
-    /// This replaced a boolean, and the reason is the middle case. On/off could only
-    /// say *whether* the wiki was consulted; the filter -- 유형, 상태, 영역, 담당, 폴더 --
-    /// was always a person's standing choice, made once in the options window and then
-    /// applied to every question regardless of what was asked. A question about one
-    /// task carried the same 84-title list as a question about none.
-    ///
-    /// `.auto` hands that choice to trolley instead: nothing rides in front of the
-    /// question, and the model picks the axes per question through `wiki_search`. That
-    /// is strictly more selective than any stored filter can be, because it is chosen
-    /// after the question is known rather than before.
-    public enum Mode: String, CaseIterable {
-        /// Nothing. No digest, and the wiki tools are not in the catalog either -- a
-        /// tool that is listed but must not be used is worse than one that is absent.
-        case off
-        /// trolley picks. No list in front of the question; `wiki_search`/`wiki_read`
-        /// are in the catalog with every axis open, and the stored filter is not
-        /// applied to them.
-        case auto
-        /// The stored filter decides, and its digest rides the first question of a
-        /// conversation. What every enabled wiki did before `.auto` existed.
-        case manual
-
-        public var title: String {
-            switch self {
-            case .off: return "끔"
-            case .auto: return "자동 — trolley가 고름"
-            case .manual: return "직접 지정"
-            }
-        }
-    }
-
-    /// On when there is a wiki to be on about.
-    ///
-    /// This used to start `.off` and wait to be switched on, and what that cost is the
-    /// reason it no longer does: the folder read fine, the options window's preview
-    /// listed all 48 pages of it, and the setup row still said 꺼져 있음 -- because the
-    /// preview never consulted the switch. A checkbox standing between a folder already
-    /// on the disk and the wiki counting for anything only ever produced that.
-    ///
-    /// So the disk decides, unless a person has said otherwise. A stored choice always
-    /// wins: picking 끔 writes `modeKey`, and that keeps it off for good. `.auto` rather
-    /// than `.manual` is what a detected wiki lands on -- it is the mode that spends no
-    /// context up front, which is the only honest default for something nobody asked
-    /// for.
-    ///
-    /// The legacy boolean still means `.auto` when it says true. When it says false it is
-    /// *not* read as a refusal: false was the old default, so it is equally what every
-    /// install that never opened the window stored, and the two cannot be told apart.
-    /// Anyone who does mean off now says so in a window that records it as such.
-    public static var mode: Mode {
-        get {
-            if let raw = defaults.string(forKey: modeKey), let stored = Mode(rawValue: raw) {
-                return stored
-            }
-            if defaults.bool(forKey: enabledKey) { return .auto }
-            return rootIsReadable ? .auto : .off
-        }
-        set {
-            defaults.set(newValue.rawValue, forKey: modeKey)
-            // The boolean is still written, and for the same reason `WikiFilter` still
-            // encodes `includeSummary`: `trolley update` can put an older bundle back
-            // on the same defaults domain, and that build reads only this key.
-            defaults.set(newValue != .off, forKey: enabledKey)
-            // Only `.manual` ever sends a digest, so leaving it means whatever the
-            // conversation was told is no longer something to compare against.
-            if newValue != .manual { clearSent() }
-        }
-    }
-
-    /// True when nothing is stored and the folder itself is what turned the wiki on.
-    ///
-    /// Exists so the setup row and `trolley wiki` can say *why* it is on. Being told the
-    /// wiki is 자동 is not the same as being told nobody chose that -- and someone who
-    /// wants it off needs to know there is a switch they have never touched.
-    public static var modeWasDetected: Bool {
-        defaults.string(forKey: modeKey) == nil
-            && !defaults.bool(forKey: enabledKey)
-            && rootIsReadable
-    }
-
-    /// Whether the wiki is reachable at all -- as a digest or as a tool.
-    ///
-    /// Kept because that is the question most callers actually have (the setup row, the
-    /// prewarm, the tool catalog), and none of them care which of the two enabled modes
-    /// is set. Writing `true` means `.auto`, which is what "turn the wiki on" now means.
-    public static var isEnabled: Bool {
-        get { mode != .off }
-        set { mode = newValue ? .auto : .off }
+    /// Called once at launch. `trolley update` can put an older bundle back on this same
+    /// defaults domain, and that build reads `trolley.wiki.enabled` -- a `false` left
+    /// there from before the switch was retired would silently turn its wiki off. The
+    /// digest bookkeeping goes with them: nothing sends a digest any more, so a record of
+    /// what was sent is a claim about a conversation this build cannot make.
+    public static func forgetRetiredSettings() {
+        for key in retiredKeys { defaults.removeObject(forKey: key) }
     }
 
     /// A stored filter that no longer decodes -- an older release's shape -- falls
@@ -252,39 +174,6 @@ public enum WikiSettings {
         }
     }
 
-    /// What the model has already been told, and in which conversation.
-    public struct SentRecord: Equatable {
-        public let conversationID: String
-        public let digestHash: String
-        public let count: Int
-
-        public init(conversationID: String, digestHash: String, count: Int) {
-            self.conversationID = conversationID
-            self.digestHash = digestHash
-            self.count = count
-        }
-    }
-
-    public static var sent: SentRecord? {
-        get {
-            guard let conversation = defaults.string(forKey: sentConversationKey),
-                  !conversation.isEmpty,
-                  let hash = defaults.string(forKey: sentHashKey), !hash.isEmpty
-            else { return nil }
-            return SentRecord(
-                conversationID: conversation,
-                digestHash: hash,
-                count: max(1, defaults.integer(forKey: sentCountKey))
-            )
-        }
-        set {
-            guard let newValue else { clearSent(); return }
-            defaults.set(newValue.conversationID, forKey: sentConversationKey)
-            defaults.set(newValue.digestHash, forKey: sentHashKey)
-            defaults.set(newValue.count, forKey: sentCountKey)
-        }
-    }
-
     // MARK: - Who "me" is
 
     public static let meKey = "trolley.wiki.me"
@@ -296,8 +185,6 @@ public enum WikiSettings {
     /// `Version.swift` is the release repo's owner, not whoever is running the build.
     /// Guessing either would be wrong for two of this vault's three people, so it is
     /// learned instead -- picking yourself in the 담당 popup and saving is what sets it.
-    ///
-    /// Deliberately does *not* `clearSent()`: this is not part of the digest.
     public static var me: String {
         get {
             defaults.string(forKey: meKey)?
@@ -313,9 +200,4 @@ public enum WikiSettings {
         }
     }
 
-    public static func clearSent() {
-        defaults.removeObject(forKey: sentConversationKey)
-        defaults.removeObject(forKey: sentHashKey)
-        defaults.removeObject(forKey: sentCountKey)
-    }
 }

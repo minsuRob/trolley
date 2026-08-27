@@ -3,35 +3,6 @@ import TrolleyKit
 import TrolleyMCP
 
 
-/// What the wiki is contributing to the next question, flattened for the hint line.
-///
-/// Nil when the wiki is off or has nothing to add. Present-but-`attaching == false`
-/// means this conversation has already been given the list, which is the normal state
-/// after the first question and worth saying so it does not read as a failure.
-struct WikiBadge: Equatable {
-    let matched: Int
-    let attaching: Bool
-    let isRefresh: Bool
-    /// The wiki changed, but this conversation has had as many refreshes as it may get.
-    let capped: Bool
-    /// Under `.auto` every field above is moot: nothing is attached, so there is no
-    /// count to report and nothing to refresh. The line still has to say the wiki is
-    /// reachable, because "위키가 켜져 있는데 왜 아무 말도 없지" is the question a silent
-    /// hint would leave.
-    let mode: WikiSettings.Mode
-
-    init(
-        matched: Int, attaching: Bool, isRefresh: Bool, capped: Bool,
-        mode: WikiSettings.Mode = .manual
-    ) {
-        self.matched = matched
-        self.attaching = attaching
-        self.isRefresh = isRefresh
-        self.capped = capped
-        self.mode = mode
-    }
-}
-
 /// The local model's side of the panel, flattened for rendering. A snapshot
 /// rather than the session itself, so the panel cannot accidentally drive it.
 struct LocalLLMSnapshot {
@@ -49,11 +20,9 @@ struct LocalLLMSnapshot {
 /// Everything the activity panel renders, assembled by the widget controller.
 struct ActivityPanelModel {
     let log: ActivityLog
-    let uptime: TimeInterval
     let axGranted: Bool
     let screenRecordingGranted: Bool
     let llm: LocalLLMSnapshot
-    let wiki: WikiBadge?
 }
 
 /// Fixed column widths for the call rows. The panel is a fixed width, so
@@ -166,7 +135,6 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
     // The panel refreshes on every tool call, so its chrome is built once and
     // only its text is updated. Rebuilding would throw away both the prompt the
     // user is halfway through typing and the field's first-responder status.
-    private let uptimeLabel = ActivityPanelController.makeLabel(Style.mono, .secondaryLabelColor)
     /// The session counters, and the control that opens the call list under
     /// them. A plain label until it had somewhere to lead.
     private let callsToggle = PanelButton()
@@ -433,7 +401,12 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         leading.alignment = .centerY
         leading.spacing = 6
 
-        stack.addArrangedSubview(headerRow(leading, uptimeLabel, alignment: .centerY))
+        // No trailing half any more -- 가동 시간 moved into the setup window's
+        // "자세히" table, where a number you read once belongs. The row still gets
+        // the panel's fixed width so the title, not the panel edge, takes the slack.
+        leading.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        leading.widthAnchor.constraint(equalToConstant: Self.contentWidth).isActive = true
+        stack.addArrangedSubview(leading)
         buildCallsToggle()
         stack.addArrangedSubview(callsToggle)
 
@@ -792,7 +765,6 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
     // MARK: - Content
 
     private func update(_ model: ActivityPanelModel) {
-        uptimeLabel.stringValue = "up " + PanelFormat.uptime(model.uptime)
         statsText = PanelFormat.stats(
             calls: model.log.totalCalls, errors: model.log.errorCount
         )
@@ -970,37 +942,15 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
 }
 
 /// The panel's number formatting, kept free of AppKit so the awkward cases
-/// (an hour of uptime, a sub-millisecond call) are testable.
+/// (a sub-millisecond call) are testable.
 enum PanelFormat {
-    /// The hint under the prompt box. Pure so the combinations stay testable, and
-    /// "already sent" has to read as normal rather than as a fault.
+    /// The hint under the prompt box.
+    ///
+    /// One line again. It used to carry what the wiki was about to attach -- 첨부, 다시
+    /// 첨부, 이미 전달됨, and a warning when a conversation had had its fill -- because
+    /// the wiki rode along with whatever was typed here. Nothing rides along now; the
+    /// vault is read in its own window, and this box is about this Mac.
     static let plainHint = "엔터를 누르면 답이 여기에 나옵니다"
-
-    static func promptHint(wiki: WikiBadge?) -> String {
-        guard let wiki else { return plainHint }
-        if wiki.mode == .auto {
-            return plainHint + " · 위키는 trolley가 직접 찾아봅니다"
-        }
-        if wiki.capped {
-            return plainHint + " · 위키가 바뀌었습니다 (새 대화부터 반영)"
-        }
-        if wiki.attaching {
-            return plainHint + (wiki.isRefresh
-                ? " · 위키 \(wiki.matched)건 다시 첨부"
-                : " · 위키 \(wiki.matched)건 첨부")
-        }
-        return plainHint + " · 위키 \(wiki.matched)건 (이미 전달됨)"
-    }
-
-    static func uptime(_ interval: TimeInterval) -> String {
-        let total = max(0, Int(interval))
-        let (hours, minutes, seconds) = (total / 3600, (total % 3600) / 60, total % 60)
-        // Hours only once there are any -- "00:14:02" reads as a stopwatch, and
-        // a session that old is the exception.
-        return hours > 0
-            ? String(format: "%d:%02d:%02d", hours, minutes, seconds)
-            : String(format: "%02d:%02d", minutes, seconds)
-    }
 
     static func stats(calls: Int, errors: Int) -> String {
         "호출 \(calls) · 실패 \(errors)"

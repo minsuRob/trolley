@@ -1,24 +1,20 @@
 import XCTest
 @testable import TrolleyWidget
 
-/// What is left of a much larger file. Most of these tests defended one rule -- that the
-/// panel must neither offer nor honour a second prompt destination -- and that rule is
-/// now structural: there is one destination, so there is nothing to get wrong. Deleting
-/// the type deleted the tests with it.
+/// What is left of a much larger file, twice over. Most of these tests defended one rule
+/// -- that the panel must neither offer nor honour a second prompt destination -- and
+/// that rule became structural when the second destination went away. The rest defended
+/// the wiki hint, which went the same way: the vault is read in its own window now, so
+/// this box has nothing to announce and the hint is one constant line.
 ///
-/// These are the rules that outlived it.
+/// These are the rules that outlived both.
 final class PromptSectionStateTests: XCTestCase {
-    private func model(
-        llm: LocalLLMSnapshot = .empty,
-        wiki: WikiBadge? = nil
-    ) -> ActivityPanelModel {
+    private func model(llm: LocalLLMSnapshot = .empty) -> ActivityPanelModel {
         ActivityPanelModel(
             log: ActivityLog(),
-            uptime: 0,
             axGranted: true,
             screenRecordingGranted: true,
-            llm: llm,
-            wiki: wiki
+            llm: llm
         )
     }
 
@@ -36,29 +32,14 @@ final class PromptSectionStateTests: XCTestCase {
         XCTAssertTrue(PromptSectionState(model: model(llm: answered(busy: true))).showsStopButton)
     }
 
-    /// The one thing that still turns the hint orange. A wiki whose digest no longer
-    /// fits is a fact about the *next* conversation, so saying it plainly beats letting
-    /// someone wonder why the list they edited did not take.
-    func testCappedWikiStillWarns() {
-        let capped = WikiBadge(matched: 40, attaching: true, isRefresh: false, capped: true)
-        let state = PromptSectionState(model: model(wiki: capped))
-        XCTAssertTrue(state.hintIsWarning)
-        XCTAssertTrue(state.hint.contains("새 대화부터 반영"), state.hint)
-    }
-
-    func testNoWikiLeavesThePlainHint() {
+    /// One line, always. The hint used to change with what the wiki was about to attach;
+    /// nothing attaches now, and a box that still hinted at the vault would be pointing
+    /// at a window this is not.
+    func testHintIsThePlainLineAndNeverAWarning() {
         let state = PromptSectionState(model: model())
         XCTAssertEqual(state.hint, PanelFormat.plainHint)
         XCTAssertFalse(state.hintIsWarning)
-    }
-
-    /// Already-sent has to read as normal rather than as a fault -- it is the steady
-    /// state of every conversation after the first turn.
-    func testAlreadySentWikiIsNotAWarning() {
-        let sent = WikiBadge(matched: 12, attaching: false, isRefresh: false, capped: false)
-        let state = PromptSectionState(model: model(wiki: sent))
-        XCTAssertFalse(state.hintIsWarning)
-        XCTAssertTrue(state.hint.contains("이미 전달됨"), state.hint)
+        XCTAssertEqual(PromptSectionState(model: model(llm: answered())).hint, PanelFormat.plainHint)
     }
 
     /// Says nothing about which model or where it runs; that belongs in 자세히.

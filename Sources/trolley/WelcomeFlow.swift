@@ -18,10 +18,17 @@ enum WelcomeFlow {
     /// Held for the life of the process: this static is the only strong reference
     /// to the status item, and to the target every menu item points at weakly.
     private static var menuBar: MenuBarController?
+    /// One for the life of the app, like `setup`. Same reason, and it matters more here:
+    /// this one owns a `LocalLLMSession` mid-generation.
+    private static var wiki: WikiWindowController?
     /// Owns the six-hour timer. Held for the same reason as the others: dropping
     /// it cancels the schedule, and a checker that stops after one run is worse
     /// than none because it looks like it is working.
     private static var updates: UpdateCoordinator?
+    /// The moment this run began, stamped by `run()` rather than by whoever first
+    /// reads it -- the setup window's "가동 시간" is measured from here, and that
+    /// window is often not built until hours in.
+    private static var launchedAt = Date()
 
     /// launchd sets `__CFBundleIdentifier` to the identifier of the bundle it
     /// opened. Merely being set is not enough to go on: Terminal exports its own
@@ -40,6 +47,7 @@ enum WelcomeFlow {
     }
 
     static func run() {
+        launchedAt = Date()
         let app = NSApplication.shared
         // .accessory: a pet on screen, not an app in the Dock. Windows still
         // open and come forward.
@@ -90,15 +98,19 @@ enum WelcomeFlow {
         // --widget` draws the same pet but must not put an icon up there.
         let bar = MenuBarController(
             onAsk: { controller.presentPromptPanel(focus: true) },
+            onOpenWiki: { openWiki() },
             onOpenSettings: { openSetup() },
             onQuit: { NSApp.terminate(nil) }
         )
         menuBar = bar
         bar.install()
 
-        // Warmed here so the first question does not pay for a cold walk of the wiki on
-        // the main thread, between the keystroke and the request.
-        if WikiSettings.isEnabled, let root = WikiSettings.rootURL {
+        // Cleared once, at launch: keys only older builds understood, whose stale values
+        // would otherwise be read again by an older bundle put back by `trolley update`.
+        WikiSettings.forgetRetiredSettings()
+        // Warmed here so opening the wiki window does not pay for a cold walk of the
+        // vault on the main thread, between the click and the list appearing.
+        if WikiSettings.rootIsReadable, let root = WikiSettings.rootURL {
             WikiIndex.shared.prewarm(root: root)
         }
 
@@ -186,8 +198,9 @@ enum WelcomeFlow {
     /// on close takes the process down with it when anything touches it again.
     static func openSetup() {
         if setup == nil {
-            let controller = SetupWindowController()
+            let controller = SetupWindowController(launchedAt: launchedAt)
             controller.onAsk = { widget?.presentPromptPanel(focus: true) }
+            controller.onOpenWiki = { openWiki() }
             // The other place the transition is seen: the window is open exactly
             // when something still needs granting, so it always witnesses the
             // moment the last dot turns green.
@@ -195,5 +208,15 @@ enum WelcomeFlow {
             setup = controller
         }
         setup?.show()
+    }
+
+    /// The wiki window, opened from the menu bar or from the setup window's row.
+    ///
+    /// Held for the life of the app for the same reason `setup` is, plus one of its own:
+    /// this window owns a conversation and possibly a generation in flight, and building
+    /// a fresh controller per open would abandon both mid-answer.
+    static func openWiki() {
+        if wiki == nil { wiki = WikiWindowController() }
+        wiki?.show()
     }
 }

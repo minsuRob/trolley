@@ -12,18 +12,35 @@ import Foundation
 /// attributes, so what is left here is a mapping from those intents to fonts and
 /// paragraph styles -- which is the part that has to match this panel, and the only part
 /// worth writing by hand.
-enum MarkdownRendering {
-    /// Rendered for a 360pt panel, so every size here is small and the indents are
-    /// tighter than a document would use.
-    struct Style {
+public enum MarkdownRendering {
+    /// Two sizes, because two surfaces read markdown now and they are not the same
+    /// shape: a 360pt panel showing an answer as it streams, and a resizable window
+    /// showing a wiki page someone means to actually read.
+    public struct Style {
         let body: NSFont
         let mono: NSFont
         let textColor: NSColor
         let secondaryColor: NSColor
 
-        static let panel = Style(
+        public init(body: NSFont, mono: NSFont, textColor: NSColor, secondaryColor: NSColor) {
+            self.body = body
+            self.mono = mono
+            self.textColor = textColor
+            self.secondaryColor = secondaryColor
+        }
+
+        /// Small, with tighter indents than a document would use -- 360pt is not much.
+        public static let panel = Style(
             body: .systemFont(ofSize: 11),
             mono: .monospacedSystemFont(ofSize: 10, weight: .regular),
+            textColor: .labelColor,
+            secondaryColor: .secondaryLabelColor
+        )
+
+        /// A page being read rather than a reply being watched.
+        public static let document = Style(
+            body: .systemFont(ofSize: 13),
+            mono: .monospacedSystemFont(ofSize: 12, weight: .regular),
             textColor: .labelColor,
             secondaryColor: .secondaryLabelColor
         )
@@ -32,7 +49,7 @@ enum MarkdownRendering {
     /// - Parameter markdown: may be half-written. This is called on every streamed
     ///   token, so an unclosed `**` or an unterminated fence is the normal case, not an
     ///   error -- see `failurePolicy` below.
-    static func attributed(_ markdown: String, style: Style = .panel) -> NSAttributedString {
+    public static func attributed(_ markdown: String, style: Style = .panel) -> NSAttributedString {
         guard !markdown.isEmpty else { return NSAttributedString() }
 
         let parsed: AttributedString

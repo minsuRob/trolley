@@ -15,40 +15,27 @@ import TrolleyKit
 public struct WikiTools {
     let index: WikiIndex
     let rootURL: () -> URL?
-    let storedFilter: () -> WikiFilter
-    let mode: () -> WikiSettings.Mode
 
     public init(
         index: WikiIndex = .shared,
-        rootURL: @escaping () -> URL? = { WikiSettings.rootURL },
-        storedFilter: @escaping () -> WikiFilter = { WikiSettings.filter },
-        mode: @escaping () -> WikiSettings.Mode = { WikiSettings.mode }
+        rootURL: @escaping () -> URL? = { WikiSettings.rootURL }
     ) {
         self.index = index
         self.rootURL = rootURL
-        self.storedFilter = storedFilter
-        self.mode = mode
     }
 
-    /// The folders a call may reach into when it names none itself.
+    /// The folders a call may reach into when it names none itself: all of them.
     ///
-    /// `.auto` opens `members/` and `logs/` as well, because in that mode the person is
-    /// no longer standing between the question and the vault -- "지난주 회의 뭐였지" is a
-    /// `logs/` question, and a default that cannot see the folder answers it by saying
-    /// the page does not exist. `_private` is in neither list and cannot be
-    /// asked for: `walkTargets` only ever intersects with what `WikiIndex` offers.
-    var defaultFolders: [String] {
-        switch mode() {
-        case .auto:
-            return WikiIndex.indexableFolders + WikiIndex.optionalFolders
-        case .manual, .off:
-            let stored = storedFilter().folders
-            guard !stored.isEmpty else { return WikiIndex.indexableFolders }
-            return (WikiIndex.indexableFolders + WikiIndex.optionalFolders).filter { candidate in
-                stored.contains { $0 == candidate || candidate.hasPrefix($0 + "/") }
-            }
-        }
-    }
+    /// `members/` and `logs/` included, because nobody is standing between the question
+    /// and the vault here -- "지난주 회의 뭐였지" is a `logs/` question, and a default that
+    /// cannot see the folder answers it by saying the page does not exist. This used to
+    /// narrow to the options window's stored folder set unless the mode was 자동; the
+    /// stored filter is now what the wiki *window* starts its list from, which is a
+    /// person's view and not a limit on what may be asked for.
+    ///
+    /// `_private` is not on the list and cannot be asked for: `walkTargets` only ever
+    /// intersects with what `WikiIndex` offers.
+    var defaultFolders: [String] { WikiIndex.indexableFolders + WikiIndex.optionalFolders }
 
     /// Bodies are capped rather than streamed whole. The largest page in the vault is
     /// ~7KB, so this is generous, but an agent reading five pages should not be able to
@@ -108,17 +95,54 @@ public struct WikiTools {
         ]
     }
 
+    /// The two lines the local model is told about, when it is told about these at all.
+    ///
+    /// Here rather than in `TrolleyToolRunner` because the runner that offers them is no
+    /// longer the one that drives the screen: the wiki window builds its own catalog out
+    /// of exactly this, and a second copy of the parameter names is a second thing to get
+    /// wrong. Parameter names have to be the schemas' own -- `ToolSummary.signature`
+    /// renders them straight into the prompt as the call signature, so a name that is not
+    /// in the schema is an instruction to make a call `WikiTools` rejects, with no way for
+    /// the model to find that out.
+    public static let summaries: [ToolCallContract.ToolSummary] = [
+        .init(name: "wiki_search",
+              parameters: [
+                  "titleContains", "status", "type", "category", "area",
+                  "priority", "assignee", "folder", "sort", "detail", "limit"
+              ],
+              summary: "위키에서 문서를 찾는다. 조건은 필요한 것만 골라 쓰고, 그냥 부르면 전체 목록"),
+        .init(name: "wiki_read", parameters: ["title"],
+              summary: "위키 문서 한 건의 본문을 읽는다. 제목은 [[ ]] 없이 그대로 넣는다")
+    ]
+
     // MARK: - Dispatch
 
-    /// How wide an unfiltered call may go before the count, rather than the character
-    /// budget, is what stops it.
+    /// How wide an unfiltered call may go before the count is what stops it.
     ///
     /// 150 rather than `limit`'s 40 because the two calls are different questions. A
     /// filtered search is looking for something and 40 hits is already a failed filter;
-    /// an unfiltered one is asking what exists, and at `.titles` the vault's ~110 open
-    /// pages render to ~2,800 characters -- inside the 4,000 the tool result is truncated
-    /// at, where the same list at `.full` is ~9,600 and comes back cut off mid-page.
+    /// an unfiltered one is asking what exists.
+    ///
+    /// No longer the thing that keeps the answer deliverable -- `resultBudget` is. A
+    /// count cannot do that job: this was set when the vault held ~110 open pages that
+    /// rendered to ~2,800 characters, and at 241 pages the same 150 titles render to
+    /// 5,151 -- past the limit the result is cut at, with no count that would have known.
     public static let mapLimit = 150
+
+    /// How much of one search result actually reaches the model.
+    ///
+    /// `ToolCallContract.resultMessage` truncates a tool result at 4,000 characters, and
+    /// what it truncates is this object's JSON. That cut lands *inside* `pages`: the
+    /// array ends unterminated, `total` -- which sorts after it -- never arrives, and
+    /// `matched` does, so the model is handed a number that describes a list it did not
+    /// receive. Measured on the real vault: 150 titles claimed, ~115 delivered, and the
+    /// header telling it not to guess about anything not on the list.
+    ///
+    /// So the tool fits its own answer instead of being cut to fit. Below the transport
+    /// limit by enough to carry the other fields, and `note` says what was left out --
+    /// a model that knows the list is partial asks a narrower question, where one that
+    /// believes it is complete answers "그런 문서 없습니다".
+    static let resultBudget = 3_400
 
     /// The filter an unfiltered `wiki_search` runs: the whole board, as titles.
     ///
@@ -162,16 +186,54 @@ public struct WikiTools {
         // made `members`/`logs` unreachable through this tool no matter what was asked.
         let snapshot = try snapshot(folders: walkTargets(for: filter))
         let (kept, dropped) = filter.apply(to: snapshot.pages)
-        let lines: [JSONValue] = kept.map { page in
-            JSONValue.string(WikiDigestRenderer.line(for: page, detail: detail))
-        }
+        let rendered = kept.map { WikiDigestRenderer.line(for: $0, detail: detail) }
+        let fitted = Self.fit(rendered, budget: Self.resultBudget)
+
         var result: [String: JSONValue] = [:]
-        result["matched"] = JSONValue.int(kept.count)
+        result["matched"] = JSONValue.int(fitted.count)
         result["total"] = JSONValue.int(kept.count + dropped)
         result["filter"] = JSONValue.string(WikiDigestRenderer.describe(filter))
         result["detail"] = JSONValue.string(detail.rawValue)
-        result["pages"] = JSONValue.array(lines)
+        result["pages"] = JSONValue.array(fitted.map(JSONValue.string))
+        if fitted.count < kept.count + dropped {
+            result["note"] = JSONValue.string(Self.note(
+                shown: fitted.count, total: kept.count + dropped, detail: detail
+            ))
+        }
         return .object(result)
+    }
+
+    /// As many lines as fit, in the order the sort put them.
+    ///
+    /// A prefix rather than a sample: the sort is the answer to "what matters first", so
+    /// dropping from the tail keeps the useful end and makes what is missing describable
+    /// in one sentence.
+    static func fit(_ lines: [String], budget: Int) -> [String] {
+        var kept: [String] = []
+        var spent = 0
+        for line in lines {
+            // The JSON this ends up in wraps every line in quotes and a comma. Counting
+            // the wrapper is what keeps the budget honest about the bytes on the wire
+            // rather than the characters we happened to render.
+            let cost = line.count + 3
+            guard spent + cost <= budget else { break }
+            spent += cost
+            kept.append(line)
+        }
+        // Never nothing: an empty list reads as "no such pages", which is a different
+        // and much worse answer than "here is one, and there are more".
+        if kept.isEmpty, let first = lines.first { kept = [first] }
+        return kept
+    }
+
+    /// Written at the model, not at a person: it is the only party that can act on it.
+    static func note(shown: Int, total: Int, detail: WikiFilter.Detail) -> String {
+        var text = "\(total)건 중 \(shown)건만 실었다. 나머지는 잘린 것이 아니라 아직 보내지 않은 것이다."
+        text += " 조건을 좁혀서 다시 불러라 — folder, status, area, assignee, titleContains."
+        if detail != .titles {
+            text += " detail=titles 로 부르면 같은 한도에 더 많이 들어간다."
+        }
+        return text
     }
 
     func read(_ args: Arguments) throws -> JSONValue {

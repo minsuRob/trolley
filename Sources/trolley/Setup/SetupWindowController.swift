@@ -38,6 +38,9 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     /// Opens the prompt box. Set by `WelcomeFlow`; the ready screen's button is
     /// hidden without it, since a button that does nothing is worse than none.
     var onAsk: (() -> Void)?
+    /// Opens the wiki window. Set by `WelcomeFlow` for the same reason `onAsk` is: this
+    /// window does not own that one, and only one place in the app may.
+    var onOpenWiki: (() -> Void)?
     /// Fired the first time this window sees everything go green. `WelcomeFlow`
     /// uses it to introduce the prompt box once.
     var onBecameReady: (() -> Void)?
@@ -427,30 +430,21 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         present(title: SetupCopy.resourceSheetTitle, message: message, critical: false)
     }
 
-    /// The wiki share is counted here rather than on the server because the server
-    /// never sees it as a separate thing -- the digest rides inside the question's
-    /// one `content` string. A wiki that is off contributes nothing, which is not
-    /// the same as a wiki whose folder could not be read; both come back nil and
-    /// the copy says the room is all still there.
+    /// What the model has room for. The wiki is not counted here any more and cannot be:
+    /// it spends nothing up front. Its list used to ride inside this window's one
+    /// `content` string, which is what made it a slice of the context worth naming;
+    /// now it is read in its own window, in its own conversation, and what it costs is
+    /// that conversation's, not this one's.
     private func resourceRows(
         _ status: LocalLLMClient.Status
     ) -> [(label: String, value: String)] {
-        let wikiTokens: Int?
-        // Only 직접 지정 spends context up front. Under 자동 the wiki costs a tool result
-        // when it is used and nothing when it is not, so counting it here as a slice of
-        // the window taken would be reporting a reservation nobody made.
-        if WikiSettings.mode == .manual, let digest = WikiContext.shared.currentDigest() {
-            wikiTokens = WikiDigestRenderer.approximateTokens(characters: digest.characters)
-        } else {
-            wikiTokens = nil
-        }
-        return SetupCopy.resources(
+        SetupCopy.resources(
             busy: status.busy,
             waiting: status.waiting,
             maxQueueDepth: status.maxQueueDepth,
             maxContext: status.maxContext,
             hardContextLimit: status.hardContextLimit,
-            wikiTokens: wikiTokens,
+            wikiTokens: nil,
             lastPeakGB: status.lastPeakGB,
             totalJobs: status.totalJobs,
             remoteActive: status.remoteActive,
@@ -460,16 +454,22 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
 
     // MARK: - LLM 위키
 
-    /// The team's markdown vault, read from a local folder and summarised in front of
-    /// whatever is typed into the prompt box. Optional like Claude Code and the model
-    /// address: trolley automates apps with or without it, so an unset folder is grey.
+    /// The team's markdown vault, read from a local folder.
+    ///
+    /// Grey rather than orange when it is missing, and it always was: trolley automates
+    /// apps with or without a vault. What changed is what green *means*. It used to say
+    /// "this is riding along with your questions"; it now says "there is a wiki here to
+    /// open", and the button opens it.
     private func refreshWikiRow() {
         checkWikiIfDue()
+        let readable = wikiState == .done
         wikiRow.update(
             state: wikiState,
             detail: wikiSummary ?? "확인 중…",
-            button: "설정",
-            action: { [weak self] in self?.wikiSettings.show() }
+            button: readable ? "위키 열기" : "폴더 지정",
+            action: { [weak self] in
+                readable ? self?.onOpenWiki?() : self?.wikiSettings.show()
+            }
         )
     }
 
@@ -478,52 +478,23 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         lastWikiCheck = Date()
 
         let path = WikiSettings.rootPath
-        let mode = WikiSettings.mode
-        guard mode != .off else {
+        guard WikiSettings.rootIsReadable else {
             wikiState = .optional
-            // Two different silences, and saying the same thing about both is what sent
-            // someone hunting for a switch. Off with a wiki sitting right there is a
-            // choice that was made; off without one is nothing to choose about yet.
-            wikiSummary = WikiSettings.rootIsReadable
-                ? "끔으로 설정돼 있습니다. 설정에서 자동을 고르면 다시 켜집니다 — \(path)"
-                : "읽을 수 있는 위키 폴더가 없습니다. 폴더를 지정하면 바로 켜집니다 — \(path)"
-            return
-        }
-        guard let digest = WikiContext.shared.currentDigest() else {
-            // A folder that cannot be read is orange, not red: a missing wiki never
-            // stops a question from being asked, it just goes out bare.
-            wikiState = .actionNeeded
+            // Told apart because the fixes are different, and the wrong one sends
+            // someone hunting for a folder that never moved: `~/Desktop` is gated by
+            // macOS even for an unsandboxed app, and re-picking the folder through the
+            // panel is what attaches the permission.
             switch WikiContext.shared.lastFailure {
             case .denied:
-                // Not the same as "not found", and saying so matters -- the vault sits
-                // under ~/Desktop, which macOS gates even for an unsandboxed app, and
-                // "없습니다" sends someone hunting for a folder that never moved.
-                wikiSummary = "폴더에 접근할 수 없습니다. 설정에서 폴더를 다시 고르면 권한이 붙습니다 — \(path)"
-            case .missing:
-                wikiSummary = "폴더를 찾을 수 없습니다 — \(path)"
-            case .noRoot, .none:
-                wikiSummary = "폴더가 지정되지 않았습니다."
+                wikiSummary = "폴더에 접근할 수 없습니다. 폴더를 다시 고르면 권한이 붙습니다 — \(path)"
+            case .missing, .noRoot, .none:
+                wikiSummary = "읽을 수 있는 위키 폴더가 없습니다 — \(path)"
             }
             return
         }
 
         wikiState = .done
-        // Under 자동 the digest was still worth building -- it is how this row knows the
-        // folder reads at all -- but its size is not what the wiki costs, so the row
-        // reports what the mode means instead of a token count nothing will spend.
-        guard mode == .manual else {
-            // Whoever never opened the options window did not turn this on, and a row
-            // that reads 자동 without saying so leaves them looking for the moment they
-            // did. The folder being there is the whole reason.
-            let why = WikiSettings.modeWasDetected ? "자동 (폴더가 있어 켜짐)" : "자동"
-            wikiSummary = why + " — trolley 가 질문에 맞는 문서를 직접 찾습니다 — " + path
-            return
-        }
-        let tokens = WikiDigestRenderer.approximateTokens(characters: digest.characters)
-        var detail = "\(digest.matched)/\(digest.total)건 · 약 \(tokens)토큰"
-        detail += " (96K의 \(String(format: "%.1f", Double(tokens) / 960))%)"
-        if digest.wasTruncated { detail += " · \(digest.total - digest.matched)건 생략" }
-        wikiSummary = detail + " — " + path
+        wikiSummary = "읽힙니다. 위키 창에서 목록과 본문을 보고, 그 창에서 물어볼 수 있습니다 — " + path
     }
 
     // MARK: - Local LLM

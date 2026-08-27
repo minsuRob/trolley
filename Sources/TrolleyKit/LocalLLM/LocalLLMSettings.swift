@@ -19,6 +19,7 @@ public enum LocalLLMSettings {
     public static let baseURLKey = "trolley.localLLM.baseURL"
     public static let tokenKey = "trolley.localLLM.token"
     public static let conversationKey = "trolley.localLLM.conversationID"
+    public static let wikiConversationKey = "trolley.localLLM.wiki.conversationID"
 
     private static var defaults: UserDefaults { .standard }
 
@@ -39,8 +40,8 @@ public enum LocalLLMSettings {
             } else {
                 defaults.set(cleaned, forKey: baseURLKey)
             }
-            // A different server has different conversation ids.
-            defaults.removeObject(forKey: conversationKey)
+            // A different server has different conversation ids -- every slot's.
+            for slot in ConversationSlot.allCases { defaults.removeObject(forKey: slot.key) }
         }
     }
 
@@ -64,18 +65,46 @@ public enum LocalLLMSettings {
         }
     }
 
-    /// The thread the widget keeps talking into, so a follow-up question has the
-    /// previous turns behind it -- and so the same conversation is readable in
-    /// the server's own web UI. Cleared when the server no longer knows it.
-    public static var conversationID: String? {
-        get { defaults.string(forKey: conversationKey) }
-        set {
-            if let newValue, !newValue.isEmpty {
-                defaults.set(newValue, forKey: conversationKey)
-            } else {
-                defaults.removeObject(forKey: conversationKey)
+    /// Which thread a session talks into.
+    ///
+    /// Two, because the wiki window is a different conversation than the prompt box and
+    /// has to stay one. The server replays a whole conversation as the prompt, so a
+    /// shared thread would put a document body the wiki window sent in front of every
+    /// later "크롬 켜줘" -- which is exactly the coupling the window exists to end.
+    public enum ConversationSlot: CaseIterable {
+        /// The widget's prompt box: this Mac, its apps, the tool loop.
+        case main
+        /// The wiki window: the vault, and nothing that can touch the screen.
+        case wiki
+
+        var key: String {
+            switch self {
+            case .main: return conversationKey
+            case .wiki: return wikiConversationKey
             }
         }
+    }
+
+    /// The thread that slot keeps talking into, so a follow-up question has the previous
+    /// turns behind it -- and so the same conversation is readable in the server's own
+    /// web UI. Cleared when the server no longer knows it.
+    public static func conversationID(_ slot: ConversationSlot) -> String? {
+        defaults.string(forKey: slot.key)
+    }
+
+    public static func setConversationID(_ newValue: String?, for slot: ConversationSlot) {
+        if let newValue, !newValue.isEmpty {
+            defaults.set(newValue, forKey: slot.key)
+        } else {
+            defaults.removeObject(forKey: slot.key)
+        }
+    }
+
+    /// The widget's thread, for callers that only ever mean that one -- `trolley ask`
+    /// and `trolley prompt` both talk into the box a person is looking at.
+    public static var conversationID: String? {
+        get { conversationID(.main) }
+        set { setConversationID(newValue, for: .main) }
     }
 
     public static func makeConfig() -> LocalLLMClient.Config? {

@@ -18,8 +18,8 @@ struct PromptSectionState: Equatable {
     let showsStopButton: Bool
 
     init(model: ActivityPanelModel) {
-        hint = PanelFormat.promptHint(wiki: model.wiki)
-        hintIsWarning = model.wiki?.capped == true
+        hint = PanelFormat.plainHint
+        hintIsWarning = false
         placeholder = Self.localPlaceholder
         showsAnswerBlock = model.llm.hasContent
         showsStopButton = model.llm.isBusy

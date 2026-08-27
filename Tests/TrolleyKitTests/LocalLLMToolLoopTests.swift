@@ -61,8 +61,6 @@ final class LocalLLMToolLoopTests: XCTestCase {
                 onEvent(.finished)
                 return FakeHandle()
             } },
-            makeWikiPreamble: { _ in nil },
-            commitWikiPreamble: { _, _ in },
             toolRunner: runner
         )
         session.send(prompt)
@@ -93,8 +91,6 @@ final class LocalLLMToolLoopTests: XCTestCase {
                 onEvent(.finished)
                 return FakeHandle()
             } },
-            makeWikiPreamble: { _ in nil },
-            commitWikiPreamble: { _, _ in },
             toolRunner: runner
         )
         session.send(prompt)
@@ -143,8 +139,6 @@ final class LocalLLMToolLoopTests: XCTestCase {
                 onEvent(.finished)
                 return FakeHandle()
             } },
-            makeWikiPreamble: { _ in nil },
-            commitWikiPreamble: { _, _ in },
             toolRunner: runner
         )
         session.send("질문")
@@ -163,8 +157,6 @@ final class LocalLLMToolLoopTests: XCTestCase {
                 onEvent(.finished)
                 return FakeHandle()
             } },
-            makeWikiPreamble: { _ in nil },
-            commitWikiPreamble: { _, _ in },
             toolRunner: runner
         )
         session.send("질문")

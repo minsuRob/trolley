@@ -47,8 +47,10 @@ public final class LocalLLMSession {
     public var onChange: (() -> Void)?
 
     private let makeTurn: () -> LocalLLMTurn?
-    private let makeWikiPreamble: (String?) -> WikiPreamble?
-    private let commitWikiPreamble: (WikiPreamble, String) -> Void
+    private let makeContext: () -> String?
+    /// Which stored thread this session talks into. Two sessions with the same slot are
+    /// two views of one conversation; two slots are two conversations.
+    private let slot: LocalLLMSettings.ConversationSlot
     private var handle: LocalLLMStoppable?
 
     /// Nil leaves this a plain chat session, which is what `trolley ask` wants.
@@ -65,32 +67,30 @@ public final class LocalLLMSession {
     ///     address in the setup window takes effect on the next question rather than
     ///     the next launch -- and a closure rather than a client, so the loop's own
     ///     behaviour can be played out against a scripted model with no server.
-    ///   - makeWikiPreamble: the llmwiki list to put in front of this question, or nil.
-    ///     Defaults to nil -- the digest no longer rides every question.
+    ///   - makeContext: reference material to put in front of the next question, or nil.
+    ///     Nil for the widget's prompt box, which asks about this Mac and needs nothing
+    ///     in front of it. The wiki window passes the document it has open.
     ///
-    ///     It used to, and the cost was not what it looked like on paper. The list is
-    ///     capped at a character budget, but the loop posts `[도구 결과]` turns into the
-    ///     same conversation and the server replays *every* message as the prompt, so a
-    ///     digest sent once is re-sent, in full, on every turn of every later task.
-    ///
-    ///     The wiki is still there and still reachable: `ToolHost.wikiTools()` puts it in
-    ///     the tool catalog, so a question that actually needs the vault looks it up and
-    ///     a question about Chrome does not pay for it. Same switch governs both, so
-    ///     "위키 참고: 꺼짐" still means one thing.
-    ///   - commitWikiPreamble: records that the model has been told, which is what
-    ///     stops the same list from riding along with every later turn.
+    ///     Read per send rather than captured, and deliberately not remembered: the
+    ///     server persists a conversation and replays *every* message of it as the
+    ///     prompt, so anything put in front of one question is re-sent, in full, on every
+    ///     later turn of that conversation. Whoever passes a body here is responsible for
+    ///     starting a new conversation when the body changes -- see `WikiWindowController`.
+    ///   - slot: which stored conversation to talk into. `.main` is the widget's thread;
+    ///     the wiki window uses its own so that reading the vault cannot leak into a
+    ///     question about Chrome, which is the whole point of it having a window.
     ///   - toolRunner: what turns a tool call into something happening on this Mac.
     ///     Injected, and nil by default, for two reasons: the loop's behaviour is
     ///     testable with a fake, and the CLI path keeps the plain chat it had.
     public init(
         makeTurn: @escaping () -> LocalLLMTurn? = LocalLLMSession.liveTurn,
-        makeWikiPreamble: @escaping (String?) -> WikiPreamble? = { _ in nil },
-        commitWikiPreamble: @escaping (WikiPreamble, String) -> Void = { WikiContext.shared.commit($0, conversationID: $1) },
+        makeContext: @escaping () -> String? = { nil },
+        slot: LocalLLMSettings.ConversationSlot = .main,
         toolRunner: LocalLLMToolRunning? = nil
     ) {
         self.makeTurn = makeTurn
-        self.makeWikiPreamble = makeWikiPreamble
-        self.commitWikiPreamble = commitWikiPreamble
+        self.makeContext = makeContext
+        self.slot = slot
         self.toolRunner = toolRunner
     }
 
@@ -121,8 +121,8 @@ public final class LocalLLMSession {
         }
 
         // `prompt` is what the panel prints under 묻기:, so it stays the words that
-        // were typed. The wiki list can be 8,000 characters; putting it here would
-        // bury the question in a 360pt-wide box.
+        // were typed. A document body can be 8,000 characters; putting it here would
+        // bury the question in the box.
         prompt = trimmed
         answer = ""
         thinking = ""
@@ -133,27 +133,12 @@ public final class LocalLLMSession {
         phase = .queued(position: 0)
         onChange?()
 
-        let conversationID = LocalLLMSettings.conversationID
-        let preamble = makeWikiPreamble(conversationID)
-
         handle = turn(
-            Self.wire(prompt: trimmed, preamble: preamble, tools: toolRunner),
-            conversationID,
-            { [commitWikiPreamble] newID in
-                LocalLLMSettings.conversationID = newID
-                // A fresh conversation only learns its id here, which is why the
-                // commit happens in two places rather than one.
-                if let preamble { commitWikiPreamble(preamble, newID) }
-            },
+            Self.wire(prompt: trimmed, context: makeContext(), tools: toolRunner),
+            LocalLLMSettings.conversationID(slot),
+            { [slot] newID in LocalLLMSettings.setConversationID(newID, for: slot) },
             { [weak self] event in self?.apply(event) }
         )
-        // Recorded before the answer arrives, on purpose: the server writes the user
-        // message before it queues generation, so a cancelled or failed generation
-        // still leaves the list in the persisted history. Having sent it is the fact,
-        // whatever came back.
-        if let conversationID, let preamble {
-            commitWikiPreamble(preamble, conversationID)
-        }
         return true
     }
 
@@ -163,17 +148,17 @@ public final class LocalLLMSession {
     /// than through this session -- one function is what keeps the two paths honestly
     /// identical instead of merely similar.
     ///
-    /// The list goes first and the question last. The server takes a single `content`
-    /// string with no system-prompt field, so position is the only way to say which
-    /// part is the reference material.
+    /// The reference material goes first and the question last. The server takes a
+    /// single `content` string with no system-prompt field, so position is the only way
+    /// to say which part is the material.
     ///
-    /// The tool contract goes ahead of even the wiki list: it is the rule for the whole
-    /// exchange, while the wiki is material the question draws on. Both ride on every
+    /// The tool contract goes ahead of even that: it is the rule for the whole exchange,
+    /// while the context is something the question draws on. The contract rides on every
     /// question rather than once per conversation, because the loop's own `[도구 결과]`
     /// turns sit between one question and the next -- by the time someone asks a second
     /// thing, the contract can be a dozen messages back.
     public static func wire(
-        prompt: String, preamble: WikiPreamble?, tools: LocalLLMToolRunning? = nil
+        prompt: String, context: String? = nil, tools: LocalLLMToolRunning? = nil
     ) -> String {
         var parts: [String] = []
         if let tools {
@@ -181,7 +166,7 @@ public final class LocalLLMSession {
                 tools: tools.toolCatalog, runningApps: tools.runningAppSummaries
             ))
         }
-        if let preamble { parts.append(preamble.text) }
+        if let context, !context.isEmpty { parts.append(context) }
         parts.append(prompt)
         return parts.joined(separator: "\n\n---\n\n")
     }
@@ -207,14 +192,14 @@ public final class LocalLLMSession {
     public func startNewConversation() {
         handle?.cancel()
         handle = nil
-        LocalLLMSettings.conversationID = nil
+        LocalLLMSettings.setConversationID(nil, for: slot)
         clear()
     }
 
     /// Reads the current thread back for the transcript view, condensed by
     /// `TranscriptRendering`. Empty when nothing has been asked yet.
     public func loadTranscript(completion: @escaping (Result<[TranscriptRendering.Line], Error>) -> Void) {
-        guard let conversationID = LocalLLMSettings.conversationID,
+        guard let conversationID = LocalLLMSettings.conversationID(slot),
               let config = LocalLLMSettings.makeConfig()
         else {
             completion(.success([]))
@@ -393,8 +378,8 @@ public final class LocalLLMSession {
 
         handle = turn(
             content,
-            LocalLLMSettings.conversationID,
-            { newID in LocalLLMSettings.conversationID = newID },
+            LocalLLMSettings.conversationID(slot),
+            { [slot] newID in LocalLLMSettings.setConversationID(newID, for: slot) },
             { [weak self] event in self?.apply(event) }
         )
     }

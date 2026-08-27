@@ -46,9 +46,7 @@ final class TranscriptRenderingTests: XCTestCase {
     /// The point of the whole view. What was transmitted is the contract plus the
     /// question; what someone is looking for is the question.
     func testQuestionIsShownWithoutTheContractRidingInFrontOfIt() {
-        let wired = LocalLLMSession.wire(
-            prompt: "크롬 탭 하나 켜줘", preamble: nil, tools: nil
-        )
+        let wired = LocalLLMSession.wire(prompt: "크롬 탭 하나 켜줘", context: nil, tools: nil)
         let contracted = "도구 목록:\n- click\n\n---\n\n크롬 탭 하나 켜줘"
         XCTAssertEqual(line("user", wired)?.text, "크롬 탭 하나 켜줘")
         XCTAssertEqual(line("user", contracted)?.text, "크롬 탭 하나 켜줘")

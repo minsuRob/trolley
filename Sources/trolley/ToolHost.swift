@@ -27,11 +27,12 @@ enum ToolHost {
                 guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
                 return app.activate()
             },
-            listRunningApps: runningApps,
-            // Only when a folder has actually been pointed at. `rootPath` always has a
-            // value -- it falls back to a sensible guess -- so the test is whether that
-            // folder is really there, not whether the setting is non-empty.
-            wiki: wikiTools()
+            listRunningApps: runningApps
+            // No `wiki:`. These tools drive the screen; the vault is read in its own
+            // window, by its own runner, in its own conversation. Passing it here is
+            // what put `wiki_search` in front of every "크롬 켜줘" -- the tool catalog
+            // rides on every question, so a tool nobody asked about is a tax on all of
+            // them. `WikiToolRunner` is the only place it belongs now.
         )
     }
 
@@ -50,21 +51,5 @@ enum ToolHost {
                     isActive: app.isActive
                 )
             }
-    }
-
-    private static func wikiTools() -> WikiTools? {
-        // 끔 means gone from here too, not merely "off for my questions but still listed
-        // for the agent": a tool list that changes with a setting the person did not
-        // think applied to it is worse than either behaviour on its own.
-        //
-        // 자동 and 직접 지정 both register the pair. What separates them is what the tools
-        // *start from* -- `WikiTools.defaultFolders` reads the mode -- and whether a
-        // digest also rides in front of the question, which `WikiContext` decides.
-        guard WikiSettings.mode != .off, let root = WikiSettings.rootURL else { return nil }
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory),
-              isDirectory.boolValue
-        else { return nil }
-        return WikiTools()
     }
 }

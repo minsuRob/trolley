@@ -78,18 +78,6 @@ final class ActivityLogTests: XCTestCase {
 }
 
 final class PanelFormatTests: XCTestCase {
-    func testUptimeIsMinutesAndSecondsUntilTheFirstHour() {
-        XCTAssertEqual(PanelFormat.uptime(0), "00:00")
-        XCTAssertEqual(PanelFormat.uptime(842), "14:02")
-        XCTAssertEqual(PanelFormat.uptime(3599), "59:59")
-    }
-
-    /// The old format was minutes-only, so a two-hour session read as "120:00".
-    func testUptimeGrowsAnHoursFieldRatherThanCountingPastSixty() {
-        XCTAssertEqual(PanelFormat.uptime(3600), "1:00:00")
-        XCTAssertEqual(PanelFormat.uptime(7442), "2:04:02")
-    }
-
     func testDurationSwitchesToSecondsOnceMillisecondsGetUnreadable() {
         XCTAssertEqual(PanelFormat.duration(0.142), "142 ms")
         XCTAssertEqual(PanelFormat.duration(0.9994), "999 ms")
@@ -101,47 +89,5 @@ final class PanelFormatTests: XCTestCase {
     func testSubMillisecondDurationsAreMarkedRatherThanRoundedToZero() {
         XCTAssertEqual(PanelFormat.duration(0.0004), "<1 ms")
         XCTAssertEqual(PanelFormat.duration(0), "0 ms")
-    }
-}
-
-final class PromptHintTests: XCTestCase {
-    private func badge(
-        matched: Int = 40, attaching: Bool = true, isRefresh: Bool = false, capped: Bool = false
-    ) -> WikiBadge {
-        WikiBadge(matched: matched, attaching: attaching, isRefresh: isRefresh, capped: capped)
-    }
-
-    /// Nobody using the wiki should see the line change at all.
-    func testHintIsUnchangedWithoutAWiki() {
-        XCTAssertEqual(PanelFormat.promptHint(wiki: nil), PanelFormat.plainHint)
-    }
-
-    func testAttachingSaysHowManyPagesRideAlong() {
-        let hint = PanelFormat.promptHint(wiki: badge())
-        XCTAssertTrue(hint.hasPrefix(PanelFormat.plainHint))
-        XCTAssertTrue(hint.contains("위키 40건 첨부"))
-    }
-
-    func testRefreshIsDistinguishedFromAFirstAttach() {
-        XCTAssertTrue(PanelFormat.promptHint(wiki: badge(isRefresh: true)).contains("다시 첨부"))
-    }
-
-    /// Under 자동 there is nothing attached and nothing to count, but the line still has
-    /// to say the wiki is reachable -- silence there reads as "위키가 켜져 있는데 왜
-    /// 아무 말도 없지".
-    func testAutoSaysTrolleyLooksItUpItself() {
-        let hint = PanelFormat.promptHint(
-            wiki: WikiBadge(matched: 0, attaching: false, isRefresh: false, capped: false, mode: .auto)
-        )
-        XCTAssertTrue(hint.hasPrefix(PanelFormat.plainHint))
-        XCTAssertTrue(hint.contains("trolley가 직접 찾아봅니다"), hint)
-        XCTAssertFalse(hint.contains("0건"), hint)
-    }
-
-    /// The normal state after the first question of a conversation. It has to read as
-    /// ordinary, not as something having gone wrong.
-    func testAlreadySentReadsAsNormal() {
-        let hint = PanelFormat.promptHint(wiki: badge(attaching: false))
-        XCTAssertTrue(hint.contains("이미 전달됨"), hint)
     }
 }

@@ -86,17 +86,13 @@ final class WikiToolsTests: XCTestCase {
 
     override func setUpWithError() throws {
         fixture = try ToolFixture()
-        // A fresh index per test, and a filter that constrains nothing, so what is
-        // asserted is the tool's own behaviour rather than a stored setting.
-        tools = WikiTools(
-            index: WikiIndex(),
-            rootURL: { [root = fixture.root] in root },
-            storedFilter: { WikiFilter() },
-            // Named rather than left to `WikiSettings.mode`: that reads the *test
-            // process's* defaults, so what these assert would depend on whatever the
-            // machine happened to have stored.
-            mode: { .auto }
-        )
+        // A fresh index per test, so what is asserted is the tool's own behaviour.
+        //
+        // Nothing to pin any more: `WikiTools` used to take the stored filter and the
+        // mode, both of which read the *test process's* defaults by default, and a test
+        // that forgot to name them passed or failed on what the machine had stored. It
+        // now takes a root and nothing else.
+        tools = WikiTools(index: WikiIndex(), rootURL: { [root = fixture.root] in root })
     }
 
     override func tearDown() {
@@ -202,25 +198,19 @@ final class WikiToolsTests: XCTestCase {
         XCTAssertEqual(strings(try tools.search(args(["area": .array([.string("없는영역")])])), "pages").count, 0)
     }
 
-    /// An agent asking for 완료 pages must not silently get the widget's 진행중 filter
-    /// applied on top of its own request.
+    /// An agent asking for 완료 pages must not get the options window's 진행중 filter
+    /// applied on top of its request. Structural now -- the tool cannot see that filter
+    /// at all -- and asserted anyway, because "cannot see it" is the property that matters
+    /// and it is one constructor argument away from being untrue again.
     func testSearchDoesNotInheritTheStoredFilter() throws {
-        let narrow = WikiTools(
-            index: WikiIndex(),
-            rootURL: { [root = fixture.root] in root },
-            storedFilter: { WikiFilter.default },   // 상태=진행중
-            // Pinned for the reason `setUpWithError` pins it, and this is the case that
-            // proved the reason: left to `WikiSettings.mode` it read the test process's
-            // defaults, where a wiki checkout on the machine is now enough to resolve to
-            // `.auto` -- which widens the default folders and puts a second page in the
-            // result. 직접 지정 is the mode where a stored filter is in force at all, so
-            // it is also the only one this test has anything to say about.
-            mode: { .manual }
-        )
-        let result = try narrow.search(args(["status": .array([.string("완료")])]))
-        let pages = strings(result, "pages")
-        XCTAssertEqual(pages.count, 1)
-        XCTAssertTrue(pages[0].contains("[[끝난 일감]]"))
+        let narrow = WikiTools(index: WikiIndex(), rootURL: { [root = fixture.root] in root })
+        let pages = strings(try narrow.search(args(["status": .array([.string("완료")])])), "pages")
+        // Both 완료 pages, and one of them is in `logs/`. That page used to be reachable
+        // only under 자동 -- the stored folder set narrowed the *walk*, so a call that
+        // asked for nothing but a status got whatever folders somebody picked last week.
+        XCTAssertEqual(pages.count, 2, "\(pages)")
+        XCTAssertTrue(pages.contains { $0.contains("[[끝난 일감]]") }, "\(pages)")
+        XCTAssertTrue(pages.contains { $0.contains("[[2026-07-05 회의]]") }, "\(pages)")
     }
 
     func testSearchReportsWhatItTruncated() throws {
@@ -266,20 +256,6 @@ final class WikiToolsTests: XCTestCase {
     /// optional folders are in reach without being asked for by name.
     func testAutoModeSeesTheOptionalFoldersByDefault() throws {
         XCTAssertTrue(strings(try tools.search(args([:])), "pages").contains { $0.contains("2026-07-05 회의") })
-    }
-
-    /// 직접 지정 keeps the stored folder choice as the default, because in that mode it
-    /// is a choice somebody actually made.
-    func testManualModeStaysInTheConfiguredFolders() throws {
-        let manual = WikiTools(
-            index: WikiIndex(),
-            rootURL: { [root = fixture.root] in root },
-            storedFilter: { WikiFilter(folders: ["context/tasks"]) },
-            mode: { .manual }
-        )
-        let pages = strings(try manual.search(args([:])), "pages")
-        XCTAssertFalse(pages.contains { $0.contains("2026-07-05 회의") }, pages.description)
-        XCTAssertEqual(pages.count, 2)
     }
 
     /// `sort` was one of the two axes the old implementation inherited from the stored
@@ -346,12 +322,105 @@ final class WikiToolsTests: XCTestCase {
         }
     }
 
+    // MARK: - Fitting one tool result
+
+    /// The defect this budget exists for. A tool result is truncated at 4,000 characters
+    /// by `ToolCallContract.resultMessage`, and what gets truncated is this object's
+    /// JSON -- the cut lands inside `pages`, `total` sorts after it and never arrives,
+    /// and `matched` does, so the model is handed a count for a list it did not receive.
+    func testAListTooLongToSendIsShortenedRatherThanCut() {
+        let lines = (0..<400).map { "- [[문서 \($0)]] · 진행중" }
+        let fitted = WikiTools.fit(lines, budget: WikiTools.resultBudget)
+        XCTAssertLessThan(fitted.count, lines.count)
+        // The wrapper counts too: every line lands in JSON inside quotes and a comma.
+        let spent = fitted.reduce(0) { $0 + $1.count + 3 }
+        XCTAssertLessThanOrEqual(spent, WikiTools.resultBudget)
+        // A prefix, not a sample -- the sort already answered "what matters first".
+        XCTAssertEqual(Array(lines.prefix(fitted.count)), fitted)
+    }
+
+    /// An empty list reads as "no such pages", which is a different and much worse
+    /// answer than "here is one, and there are more".
+    func testOneLineTooLongForTheBudgetStillComesBack() {
+        let huge = String(repeating: "가", count: WikiTools.resultBudget * 2)
+        XCTAssertEqual(WikiTools.fit([huge], budget: WikiTools.resultBudget), [huge])
+    }
+
+    /// What the model can act on. Being handed a short list is fine; being handed one
+    /// with no way to know it is short is what produced "그런 문서 없습니다".
+    func testTheNoteSaysWhatIsMissingAndHowToAskAgain() {
+        let note = WikiTools.note(shown: 115, total: 241, detail: .titles)
+        XCTAssertTrue(note.contains("241"), note)
+        XCTAssertTrue(note.contains("115"), note)
+        XCTAssertTrue(note.contains("folder"), note)
+        // Only worth saying when there is a cheaper shape to ask for.
+        XCTAssertFalse(note.contains("detail=titles"), note)
+        XCTAssertTrue(WikiTools.note(shown: 1, total: 2, detail: .full).contains("detail=titles"))
+    }
+
+    /// `total` is the count the note is about, so it has to survive a shortened list --
+    /// and `matched` has to describe what was actually sent, not what matched.
+    func testAShortenedResultReportsBothCountsAndSaysSo() throws {
+        let result = try tools.search(args(["limit": .int(1)]))
+        guard case .object(let object) = result else { return XCTFail("객체가 아니다") }
+        XCTAssertEqual(object["matched"], .int(1))
+        XCTAssertEqual(object["total"], .int(3))
+        XCTAssertNotNil(object["note"])
+    }
+
+    /// Nothing left out, nothing to say. A note on a complete list would teach the model
+    /// to narrow a search that already answered the question.
+    func testACompleteResultCarriesNoNote() throws {
+        guard case .object(let object) = try tools.search(args([:])) else {
+            return XCTFail("객체가 아니다")
+        }
+        XCTAssertEqual(object["matched"], object["total"])
+        XCTAssertNil(object["note"])
+    }
+
     // MARK: - No wiki
 
     func testMissingRootIsReportedAsUnavailable() {
-        let orphan = WikiTools(index: WikiIndex(), rootURL: { nil }, storedFilter: { WikiFilter() })
+        let orphan = WikiTools(index: WikiIndex(), rootURL: { nil })
         XCTAssertThrowsError(try orphan.search(args([:]))) { error in
             XCTAssertEqual((error as? ToolError)?.code, .wikiUnavailable)
+        }
+    }
+}
+
+/// The runner the wiki window's prompt talks through.
+final class WikiToolRunnerTests: XCTestCase {
+    /// The separation, asserted. A model asked about a wiki page has no business being
+    /// told it can press ⌘T -- and the catalog is read from the top, which is why the
+    /// screen tools used to have to be *worked around* by prepending the wiki pair.
+    func testTheCatalogIsTheTwoWikiToolsAndNothingElse() {
+        let names = WikiToolRunner().toolCatalog.map(\.name)
+        XCTAssertEqual(names, ["wiki_search", "wiki_read"])
+    }
+
+    /// The contract prints these as "지금 실행 중인 앱". Naming this Mac's apps to a model
+    /// that cannot touch any of them invites it to answer a wiki question about Chrome.
+    func testItNamesNoRunningApps() {
+        XCTAssertTrue(WikiToolRunner().runningAppSummaries.isEmpty)
+    }
+
+    /// The names in the catalog have to be the ones dispatch answers to: a summary is
+    /// rendered into the prompt as the call signature, so a name only one side knows is
+    /// an instruction to make a call that always fails.
+    func testEveryAdvertisedToolIsOneItRuns() throws {
+        let fixture = try ToolFixture()
+        let runner = WikiToolRunner(
+            wiki: WikiTools(index: WikiIndex(), rootURL: { [root = fixture.root] in root })
+        )
+        for name in runner.toolCatalog.map(\.name) {
+            let done = expectation(description: name)
+            // `wiki_read` without a title is a failed *call*, not an unknown tool -- what
+            // is being asserted is that dispatch recognises the name at all.
+            runner.run(name: name, arguments: [:]) { result in
+                XCTAssertFalse(result.contains("Unknown tool"), "\(name): \(result)")
+                done.fulfill()
+            }
+            wait(for: [done], timeout: 5)
         }
     }
 }

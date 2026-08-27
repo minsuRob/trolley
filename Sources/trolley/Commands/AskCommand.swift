@@ -31,12 +31,6 @@ struct AskCommand: ParsableCommand {
     @Flag(help: "Store --url as the default address and exit.")
     var save = false
 
-    @Flag(help: "Do not attach the llmwiki list to this question.")
-    var noWiki = false
-
-    @Flag(help: "Attach the list even if this conversation has already been given it.")
-    var forceWiki = false
-
     @Flag(help: "Print the exact content posted to /api/chat on stderr before sending.")
     var showWire = false
 
@@ -71,9 +65,6 @@ struct AskCommand: ParsableCommand {
         }
         if new {
             LocalLLMSettings.conversationID = nil
-            // A new conversation has been told nothing, so the record of what the old
-            // one was told must not make this one look already-informed.
-            WikiSettings.clearSent()
         }
         try runAsk(client, prompt: prompt)
     }
@@ -104,26 +95,22 @@ struct AskCommand: ParsableCommand {
         var lastQueuePosition: Int?
 
         let conversationID = LocalLLMSettings.conversationID
-        let preamble = wikiPreamble(for: conversationID)
         // The same pure function the widget's session uses. Building the wire format
         // twice is how the two paths would drift into being merely similar.
-        let content = LocalLLMSession.wire(prompt: prompt, preamble: preamble)
+        //
+        // No wiki. `--no-wiki`/`--force-wiki` went with the digest they governed: this
+        // command asks a model about this Mac, and the vault is read in the wiki window.
+        let content = LocalLLMSession.wire(prompt: prompt)
         if showWire {
             note("---- wire (\(content.count) chars) ----")
             FileHandle.standardError.write(Data((content + "\n").utf8))
             note("---- end wire ----")
-        } else if let preamble {
-            note("wiki — \(preamble.digest.matched)/\(preamble.digest.total)건 · \(preamble.digest.characters)자" +
-                 (preamble.isRefresh ? " (재주입)" : ""))
         }
 
         let handle = client.ask(
             content,
             conversationID: conversationID,
-            onConversation: { newID in
-                LocalLLMSettings.conversationID = newID
-                if let preamble { WikiContext.shared.commit(preamble, conversationID: newID) }
-            }
+            onConversation: { newID in LocalLLMSettings.conversationID = newID }
         ) { event in
             switch event {
             case .queued(let position):
@@ -152,10 +139,6 @@ struct AskCommand: ParsableCommand {
             }
         }
 
-        if let conversationID, let preamble {
-            WikiContext.shared.commit(preamble, conversationID: conversationID)
-        }
-
         // ^C should stop the generation on the server too, not just here: it runs
         // one at a time, so an abandoned job holds up the next question.
         installInterrupt { handle.cancel() }
@@ -164,14 +147,6 @@ struct AskCommand: ParsableCommand {
         if let failure {
             throw CleanExit.message(failure)
         }
-    }
-
-    /// `--force-wiki` bypasses the already-sent check by clearing the record rather
-    /// than by a second code path, so what it exercises is the real decision.
-    private func wikiPreamble(for conversationID: String?) -> WikiPreamble? {
-        guard !noWiki else { return nil }
-        if forceWiki { WikiSettings.clearSent() }
-        return WikiContext.shared.preamble(conversationID: conversationID)
     }
 
     // MARK: - Plumbing

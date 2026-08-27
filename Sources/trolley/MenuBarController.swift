@@ -1,4 +1,5 @@
 import AppKit
+import TrolleyKit
 
 /// The menu bar icon: a way in that is visible before you know trolley exists.
 ///
@@ -24,17 +25,26 @@ final class MenuBarController: NSObject {
     private let menu = NSMenu()
 
     private let onAsk: () -> Void
+    private let onOpenWiki: () -> Void
     private let onOpenSettings: () -> Void
     private let onQuit: () -> Void
+    /// Whether there is a vault to open. Read once, when the menu is built: a folder
+    /// that appears while the app is running is a rare enough thing that rebuilding the
+    /// menu on a timer would be paying forty times a minute for it.
+    private let wikiIsAvailable: () -> Bool
 
     init(
         onAsk: @escaping () -> Void,
+        onOpenWiki: @escaping () -> Void,
         onOpenSettings: @escaping () -> Void,
-        onQuit: @escaping () -> Void
+        onQuit: @escaping () -> Void,
+        wikiIsAvailable: @escaping () -> Bool = { WikiSettings.rootIsReadable }
     ) {
         self.onAsk = onAsk
+        self.onOpenWiki = onOpenWiki
         self.onOpenSettings = onOpenSettings
         self.onQuit = onQuit
+        self.wikiIsAvailable = wikiIsAvailable
         super.init()
     }
 
@@ -62,7 +72,7 @@ final class MenuBarController: NSObject {
         // An accessory app often has no key window, and auto-enabling then greys
         // out items that have a perfectly good explicit target.
         menu.autoenablesItems = false
-        for spec in MenuBarMenu.specs {
+        for spec in MenuBarMenu.specs(wikiIsAvailable: wikiIsAvailable()) {
             switch spec {
             case .separator:
                 menu.addItem(.separator())
@@ -86,6 +96,7 @@ final class MenuBarController: NSObject {
     }
 
     @objc fileprivate func askTapped() { onAsk() }
+    @objc fileprivate func wikiTapped() { onOpenWiki() }
     @objc fileprivate func settingsTapped() { onOpenSettings() }
     @objc fileprivate func quitTapped() { onQuit() }
 }
@@ -98,18 +109,26 @@ enum MenuBarMenu {
         case separator
     }
 
-    /// Three things, in the order someone reaches for them. "물어보기" first
-    /// because it is the whole point; "종료" last, behind a separator, because it
-    /// is the one that cannot be undone.
-    static let specs: [Spec] = [
-        .item("물어보기", #selector(MenuBarController.askTapped)),
-        .item("설정", #selector(MenuBarController.settingsTapped)),
-        .separator,
-        .item("종료", #selector(MenuBarController.quitTapped))
-    ]
+    /// In the order someone reaches for them. "물어보기" first because it is the whole
+    /// point; "종료" last, behind a separator, because it is the one that cannot be undone.
+    ///
+    /// "위키" is absent when there is no readable vault, rather than present and greyed.
+    /// A disabled item is a promise that something could be done here, and there is
+    /// nothing a person can do about a folder from a menu -- the setup window is where
+    /// that conversation belongs, and it is one item down.
+    static func specs(wikiIsAvailable: Bool) -> [Spec] {
+        var specs: [Spec] = [.item("물어보기", #selector(MenuBarController.askTapped))]
+        if wikiIsAvailable {
+            specs.append(.item("위키", #selector(MenuBarController.wikiTapped)))
+        }
+        specs.append(.item("설정", #selector(MenuBarController.settingsTapped)))
+        specs.append(.separator)
+        specs.append(.item("종료", #selector(MenuBarController.quitTapped)))
+        return specs
+    }
 
-    static var titles: [String] {
-        specs.compactMap { spec in
+    static func titles(wikiIsAvailable: Bool) -> [String] {
+        specs(wikiIsAvailable: wikiIsAvailable).compactMap { spec in
             if case .item(let title, _) = spec { return title }
             return nil
         }

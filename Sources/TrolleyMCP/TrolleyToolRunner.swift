@@ -131,7 +131,9 @@ public final class TrolleyToolRunner: LocalLLMToolRunning {
         }
     }
 
-    private static func value(from argument: ToolCallContract.JSONArgument) -> JSONValue {
+    /// Internal rather than private: `WikiToolRunner` speaks the same two notations and
+    /// a second copy of either is a second thing that can drift.
+    static func value(from argument: ToolCallContract.JSONArgument) -> JSONValue {
         switch argument {
         case .string(let text): return .string(text)
         case .number(let number):
@@ -145,7 +147,7 @@ public final class TrolleyToolRunner: LocalLLMToolRunning {
 
     /// Tool results go back as JSON text, which is what the model was shown in the
     /// contract's own examples -- one notation for both directions.
-    private static func describe(_ value: JSONValue) -> String {
+    static func describe(_ value: JSONValue) -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         guard let data = try? encoder.encode(value) else { return String(describing: value) }

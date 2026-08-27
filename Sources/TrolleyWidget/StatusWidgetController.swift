@@ -69,11 +69,8 @@ public final class StatusWidgetController {
     private var machine = WidgetStateMachine()
     private var log = ActivityLog()
     private var badgeTimer: DispatchWorkItem?
-    private let sessionStartedAt = Date()
     private let permissions: () -> (ax: Bool, screenRecording: Bool)
     private let localLLM: LocalLLMSession
-    private var cachedWikiBadge: WikiBadge?
-    private var lastWikiBadgeCheck: Date?
     /// One-shot observer for `presentPromptPanel(focus:)`; see there.
     private var activationObserver: NSObjectProtocol?
     /// Held for the life of the controller: `PromptBridge` is how `trolley prompt`
@@ -380,7 +377,6 @@ public final class StatusWidgetController {
         let grants = permissions()
         return ActivityPanelModel(
             log: log,
-            uptime: Date().timeIntervalSince(sessionStartedAt),
             axGranted: grants.ax,
             screenRecordingGranted: grants.screenRecording,
             llm: LocalLLMSnapshot(
@@ -392,51 +388,7 @@ public final class StatusWidgetController {
                 body: localLLM.visibleAnswer.isEmpty ? localLLM.draft : localLLM.visibleAnswer,
                 status: LocalLLMSession.statusLine(for: localLLM.phase, backend: localLLM.backend),
                 isBusy: localLLM.isBusy
-            ),
-            wiki: wikiBadge()
-        )
-    }
-
-    /// What the wiki will contribute to the next question.
-    ///
-    /// Read from the same settings and index the send path uses, so the hint cannot
-    /// claim one thing while the request carries another. Nil whenever the wiki is off
-    /// or has nothing to say, which keeps the line unchanged for anyone not using it.
-    ///
-    /// Gated at 5 seconds like the setup window's rows, and for a sharper reason: this
-    /// is called from `makePanelModel`, which runs on **every arriving token**. Ungated
-    /// it would walk the wiki on the main thread throughout a streaming answer. The
-    /// digest itself only moves when a filter or a file does, so a stale-by-seconds
-    /// count is the right trade.
-    private func wikiBadge() -> WikiBadge? {
-        if let last = lastWikiBadgeCheck, Date().timeIntervalSince(last) < 5 {
-            return cachedWikiBadge
-        }
-        lastWikiBadgeCheck = Date()
-        cachedWikiBadge = computeWikiBadge()
-        return cachedWikiBadge
-    }
-
-    private func computeWikiBadge() -> WikiBadge? {
-        // 자동 answers without touching the disk, which is the cheaper half of why the
-        // check is here: `currentDigest()` renders the *stored* filter, and under 자동
-        // that filter decides nothing -- a count taken from it would be a number about
-        // a list that is never sent.
-        let mode = WikiSettings.mode
-        guard mode != .off else { return nil }
-        if mode == .auto {
-            return WikiBadge(matched: 0, attaching: false, isRefresh: false, capped: false, mode: .auto)
-        }
-        guard let digest = WikiContext.shared.currentDigest(), !digest.isEmpty else { return nil }
-        let conversationID = LocalLLMSettings.conversationID
-        let sent = WikiSettings.sent
-        let alreadyToldThisOne = sent?.conversationID == conversationID
-        let isSameContent = alreadyToldThisOne && sent?.digestHash == digest.hash
-        return WikiBadge(
-            matched: digest.matched,
-            attaching: !isSameContent && !WikiContext.shared.isRefreshCapped(conversationID: conversationID),
-            isRefresh: alreadyToldThisOne && !isSameContent,
-            capped: !isSameContent && WikiContext.shared.isRefreshCapped(conversationID: conversationID)
+            )
         )
     }
 
