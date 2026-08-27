@@ -74,6 +74,38 @@ final class ToolCallContractTests: XCTestCase {
         XCTAssertFalse(ToolCallContract.preamble(tools: tools).contains("실행 중인 앱"))
     }
 
+    /// The wiki digest at `.titles` tells the model to open a page before answering, but
+    /// deliberately does not say which tool -- because `trolley ask` wires no tools at
+    /// all and `ToolHost` registers the wiki pair only when the wiki is on. Naming a tool
+    /// that is not in the catalog is how this contract ends up emitting
+    /// `{"tool": "wiki_read", …}` where the answer should be.
+    func testWikiReadIsExplainedOnlyWhenItIsInTheCatalog() {
+        XCTAssertFalse(ToolCallContract.preamble(tools: tools).contains("wiki_read"))
+
+        let withWiki = tools + [
+            .init(name: "wiki_read", parameters: ["title"], summary: "위키 문서를 읽는다")
+        ]
+        XCTAssertTrue(ToolCallContract.preamble(tools: withWiki).contains("wiki_read"))
+    }
+
+    /// Probed against the 26B model: asked about a wiki task it called `launch_app` and
+    /// then `snapshot`, taking a question about a document as a reason to go find that
+    /// document on screen. Saying so in as many words is the fix, and it has to sit
+    /// above the screen-driving rules -- everything after them reads as a footnote.
+    func testWikiRuleSaysNotToDriveTheScreenAndComesBeforeTheScreenRules() {
+        let withWiki = tools + [
+            .init(name: "wiki_read", parameters: ["title"], summary: "위키 문서를 읽는다")
+        ]
+        let text = ToolCallContract.preamble(tools: withWiki)
+        XCTAssertTrue(text.contains("화면을 조작해서 풀지 않는다"), text)
+
+        let wikiRule = try? XCTUnwrap(text.range(of: "위키(llmwiki) 질문"))
+        let screenRule = try? XCTUnwrap(text.range(of: "빈 탭에서 시작한다"))
+        if let wikiRule, let screenRule {
+            XCTAssertLessThan(wikiRule.lowerBound, screenRule.lowerBound, "위키 규칙이 화면 규칙보다 뒤에 있다")
+        }
+    }
+
     // MARK: - Reading it back
 
     func testCleanToolCall() {

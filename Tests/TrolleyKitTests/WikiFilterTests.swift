@@ -186,7 +186,8 @@ final class WikiFilterTests: XCTestCase {
         expectNew("검색어") { $0.titleContains = "멘션" }
         expectNew("정체일수") { $0.staleDays = 14 }
         expectNew("최대건수") { $0.maxCount = 7 }
-        expectNew("요약포함") { $0.includeSummary = false }
+        expectNew("상세(메타)") { $0.detail = .metadata }
+        expectNew("상세(요약)") { $0.detail = .full }
         expectNew("정렬") { $0.sort = .recent }
     }
 
@@ -195,10 +196,89 @@ final class WikiFilterTests: XCTestCase {
         original.areas = ["web", "mobile"]
         original.staleDays = 14
         original.sort = .stale
+        original.detail = .metadata
         let data = try JSONEncoder().encode(original)
         let restored = try JSONDecoder().decode(WikiFilter.self, from: data)
         XCTAssertEqual(restored, original)
         XCTAssertEqual(restored.fingerprint, original.fingerprint)
+    }
+
+    // MARK: - Migration
+
+    /// A canary on a value that changes behaviour for everyone who never customised it:
+    /// `WikiSettings` removes a stored filter equal to the default, so those people have
+    /// no saved key and simply get whatever this says.
+    func testDefaultIsInProgressAndWaitingAsTitles() {
+        XCTAssertEqual(WikiFilter.default.statuses, ["진행중", "대기"])
+        XCTAssertEqual(WikiFilter.default.detail, .titles)
+        // 진행중+대기 is 84 pages on the real vault, so a cap of 80 would cut it.
+        XCTAssertGreaterThan(WikiFilter.default.maxCount, 84)
+    }
+
+    /// The whole reason `WikiFilter` has a hand-written decoder.
+    ///
+    /// These are the bytes an older build actually wrote, as a literal rather than as
+    /// something re-encoded here -- re-encoding would pin today's shape and pass whatever
+    /// the decoder did. The synthesized initializer requires every key, so without the
+    /// custom one this JSON throws, `WikiSettings` swallows it with `try?`, and the
+    /// person's entire saved filter silently reverts to default.
+    private func decode(_ json: String) throws -> WikiFilter {
+        try JSONDecoder().decode(WikiFilter.self, from: Data(json.utf8))
+    }
+
+    func testLegacyIncludeSummaryTrueBecomesFull() throws {
+        let filter = try decode("""
+            {"types":[],"statuses":["진행중"],"categories":[],"areas":[],"priorities":[],
+             "assignees":[],"folders":["context/tasks"],"titleContains":"","maxCount":80,
+             "includeSummary":true,"sort":"board"}
+            """)
+        XCTAssertEqual(filter.detail, .full)
+        XCTAssertEqual(filter.statuses, ["진행중"])
+        XCTAssertEqual(filter.maxCount, 80)
+    }
+
+    func testLegacyIncludeSummaryFalseBecomesMetadata() throws {
+        let filter = try decode("""
+            {"types":[],"statuses":[],"categories":[],"areas":[],"priorities":[],
+             "assignees":[],"folders":[],"titleContains":"","maxCount":40,
+             "includeSummary":false,"sort":"recent"}
+            """)
+        // Not `.titles`: the boolean could only ever say "not full", so that is all it
+        // may be read as meaning.
+        XCTAssertEqual(filter.detail, .metadata)
+    }
+
+    func testDetailWinsWhenBothKeysArePresent() throws {
+        let filter = try decode("""
+            {"maxCount":40,"includeSummary":true,"detail":"titles","sort":"board"}
+            """)
+        XCTAssertEqual(filter.detail, .titles)
+    }
+
+    /// Every axis falls back rather than throwing, so the *next* axis added here does
+    /// not have to repeat this migration.
+    func testAnEmptyObjectDecodesToUsableDefaults() throws {
+        let filter = try decode("{}")
+        XCTAssertEqual(filter.detail, .full)
+        XCTAssertEqual(filter.sort, .board)
+        XCTAssertTrue(filter.statuses.isEmpty)
+        // Not the empty set. Empty means "no constraint", so defaulting a *missing*
+        // folder key to it would quietly widen an old filter into members/ and logs/.
+        XCTAssertEqual(filter.folders, Set(WikiIndex.indexableFolders))
+    }
+
+    /// An app rolled back by `trolley update` reads this same defaults domain with the
+    /// old synthesized decoder, which throws on a missing key.
+    func testEncodedFilterStillCarriesIncludeSummaryForOlderBuilds() throws {
+        for (detail, expected) in [(WikiFilter.Detail.full, true),
+                                   (.metadata, false), (.titles, false)] {
+            let data = try JSONEncoder().encode(WikiFilter(detail: detail))
+            let raw = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: data) as? [String: Any]
+            )
+            XCTAssertEqual(raw["includeSummary"] as? Bool, expected, "\(detail)")
+            XCTAssertEqual(raw["detail"] as? String, detail.rawValue)
+        }
     }
 }
 

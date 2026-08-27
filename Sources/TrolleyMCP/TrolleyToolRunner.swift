@@ -62,11 +62,21 @@ public final class TrolleyToolRunner: LocalLLMToolRunning {
             .init(name: "click_at", parameters: ["x", "y"], summary: "화면 좌표를 누른다"),
             .init(name: "move_mouse", parameters: ["x", "y"], summary: "누르지 않고 마우스만 옮긴다")
         ]
+        // Prepended, not appended. Thirteen screen-driving tools ahead of them was
+        // enough for the model to reach for `launch_app` on a wiki question; a list is
+        // read from the top, and these two are the cheapest calls in it.
         if tools.tools.contains(where: { $0.name == "wiki_search" }) {
-            catalog += [
-                .init(name: "wiki_search", parameters: ["query"], summary: "위키에서 문서를 찾는다"),
-                .init(name: "wiki_read", parameters: ["path"], summary: "위키 문서를 읽는다")
-            ]
+            catalog.insert(contentsOf: [
+                // Parameter names have to be the schemas' own. `ToolSummary.signature`
+                // renders them straight into the prompt as the call signature, so the
+                // `query`/`path` this used to say was an instruction to make a call that
+                // `WikiTools` rejects -- with no way for the model to find that out.
+                .init(name: "wiki_search",
+                      parameters: ["titleContains", "status", "assignee", "detail", "limit"],
+                      summary: "위키에서 문서를 찾는다. 제목·상태 등 한 줄 요약만 돌아온다"),
+                .init(name: "wiki_read", parameters: ["title"],
+                      summary: "위키 문서 한 건의 본문을 읽는다. 제목은 [[ ]] 없이 그대로 넣는다")
+            ], at: 0)
         }
         return catalog
     }

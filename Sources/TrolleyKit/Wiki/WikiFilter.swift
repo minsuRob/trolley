@@ -64,9 +64,17 @@ public struct WikiFilter: Codable, Equatable {
     /// Only pages whose last timeline entry is at least this old. Nil switches it off.
     public var staleDays: Int?
     public var maxCount: Int
-    /// The single biggest lever on how many characters a question carries.
-    public var includeSummary: Bool
+    /// The single biggest lever on how many characters a question carries, and now a
+    /// three-position one rather than a switch.
+    public var detail: Detail
     public var sort: Sort
+
+    /// The boolean `detail` replaced, kept for reading.
+    ///
+    /// Computed, so it stays out of the synthesized `Codable` and `Equatable` -- the
+    /// encoder writes the key by hand instead (see `encode(to:)`), and two filters that
+    /// differ only between `.titles` and `.metadata` must not compare equal.
+    public var includeSummary: Bool { detail == .full }
 
     public enum Sort: String, Codable, CaseIterable {
         /// The vault's own ordering, matching `reindex.py`.
@@ -83,26 +91,61 @@ public struct WikiFilter: Codable, Equatable {
         }
     }
 
-    /// Everything still open, and all of it.
+    /// How much of a page each line carries.
     ///
-    /// Measured against the real vault: 65 of its 110 pages are 진행중, rendering to
-    /// ~8,100 characters -- inside `WikiDigestRenderer.defaultBudget`, so the default
-    /// view is complete rather than truncated. The cap of 80 sits above that with
-    /// room for the wiki to grow before either limit bites.
+    /// The three levels are ~5x apart on the real vault: the 84 pages that are 진행중
+    /// or 대기 render to ~2,800 characters at `.titles` and ~9,600 at `.full`. That
+    /// span is the difference between a list that fits the budget whole and one that
+    /// gets cut -- which is why this is an axis and not a preference.
+    public enum Detail: String, Codable, CaseIterable {
+        /// `- [[제목]] · 상태`
+        case titles
+        /// `- [[제목]] · 상태 · 분류 · 우선순위 · 영역 · 담당 · 갱신일`
+        case metadata
+        /// …` · 요약`
+        case full
+
+        public var title: String {
+            switch self {
+            case .titles: return "제목만"
+            case .metadata: return "메타데이터"
+            case .full: return "메타+요약"
+            }
+        }
+    }
+
+    /// Everything still open, as titles.
     ///
-    /// 완료 is excluded because it is 39 of the 110 pages and a question is almost
-    /// always about what is still open. Widening to it is one checkbox away.
+    /// The previous default -- 진행중 at `.full` -- measured 9,564 characters against a
+    /// 9,000 budget on the real vault, so it was silently dropping rows for everyone
+    /// who never opened the options window. `.titles` brings the same list to ~2,600
+    /// and leaves room for 대기 as well.
+    ///
+    /// 대기 is in because a question about "what is open" means work that is blocked
+    /// too, and 보류 and 완료 are out because they are the two states nobody is asked
+    /// about. Both are one checkbox away.
+    ///
+    /// `maxCount` rises with the detail drop: at `.titles` the character budget stops
+    /// being the binding limit and the count becomes it, and 진행중+대기 is 84 pages
+    /// today -- already past the old cap of 80.
+    ///
+    /// Note that `WikiSettings` removes a stored value equal to this one, so changing
+    /// this changes behaviour for everyone who merely accepted the old default. That is
+    /// deliberate here: the old default was over budget.
     public static let `default` = WikiFilter(
-        types: [], statuses: ["진행중"], categories: [], areas: [], priorities: [],
+        types: [], statuses: ["진행중", "대기"], categories: [], areas: [], priorities: [],
         assignees: [], folders: Set(WikiIndex.indexableFolders), titleContains: "",
-        staleDays: nil, maxCount: 80, includeSummary: true, sort: .board
+        staleDays: nil, maxCount: 150, detail: .titles, sort: .board
     )
 
     public init(
         types: Set<String> = [], statuses: Set<String> = [], categories: Set<String> = [],
         areas: Set<String> = [], priorities: Set<String> = [], assignees: Set<String> = [],
         folders: Set<String> = [], titleContains: String = "", staleDays: Int? = nil,
-        maxCount: Int = 40, includeSummary: Bool = true, sort: Sort = .board
+        // `.full` rather than `.default`'s `.titles`: this initializer's job is to build
+        // an explicit filter, and the widest line is the least surprising thing for an
+        // unspecified argument to mean.
+        maxCount: Int = 40, detail: Detail = .full, sort: Sort = .board
     ) {
         self.types = types
         self.statuses = statuses
@@ -114,7 +157,7 @@ public struct WikiFilter: Codable, Equatable {
         self.titleContains = titleContains
         self.staleDays = staleDays
         self.maxCount = maxCount
-        self.includeSummary = includeSummary
+        self.detail = detail
         self.sort = sort
     }
 
@@ -241,7 +284,72 @@ public struct WikiFilter: Codable, Equatable {
             joined("f", folders),
             "q=\(titleContains)",
             "d=\(staleDays.map(String.init) ?? "-")",
-            "n=\(maxCount)", "sum=\(includeSummary)", "sort=\(sort.rawValue)"
+            "n=\(maxCount)", "detail=\(detail.rawValue)", "sort=\(sort.rawValue)"
         ].joined(separator: "|")
+    }
+
+    // MARK: - Codable
+
+    /// Hand-rolled in both directions, for two different reasons.
+    ///
+    /// Decoding: the synthesized initializer requires every key, and a filter saved by
+    /// an older build has `includeSummary` and no `detail`. That throws, `WikiSettings`
+    /// swallows it with `try?`, and the person's entire saved filter silently reverts to
+    /// the default. So every axis is `decodeIfPresent` with a fallback -- which also
+    /// means the *next* axis added here will not repeat this migration.
+    ///
+    /// Encoding: `includeSummary` is still written, even though nothing in this build
+    /// reads it. An app rolled back by `trolley update` reads the same defaults domain
+    /// with the old synthesized decoder, which throws on a missing key.
+    private enum CodingKeys: String, CodingKey {
+        case types, statuses, categories, areas, priorities, assignees, folders
+        case titleContains, staleDays, maxCount, detail, includeSummary, sort
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        func set(_ key: CodingKeys) throws -> Set<String> {
+            try container.decodeIfPresent(Set<String>.self, forKey: key) ?? []
+        }
+        types = try set(.types)
+        statuses = try set(.statuses)
+        categories = try set(.categories)
+        areas = try set(.areas)
+        priorities = try set(.priorities)
+        assignees = try set(.assignees)
+        // Not `[]`: an empty folder set means "no constraint", so defaulting a *missing*
+        // key to it would quietly widen an old filter into `members/` and `logs/`.
+        folders = try container.decodeIfPresent(Set<String>.self, forKey: .folders)
+            ?? Set(WikiIndex.indexableFolders)
+        titleContains = try container.decodeIfPresent(String.self, forKey: .titleContains) ?? ""
+        staleDays = try container.decodeIfPresent(Int.self, forKey: .staleDays)
+        maxCount = try container.decodeIfPresent(Int.self, forKey: .maxCount) ?? Self.default.maxCount
+        sort = try container.decodeIfPresent(Sort.self, forKey: .sort) ?? .board
+
+        if let stored = try container.decodeIfPresent(Detail.self, forKey: .detail) {
+            detail = stored
+        } else if let legacy = try container.decodeIfPresent(Bool.self, forKey: .includeSummary) {
+            // The only two states the boolean could express, so the only two it may mean.
+            detail = legacy ? .full : .metadata
+        } else {
+            detail = .full
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(types, forKey: .types)
+        try container.encode(statuses, forKey: .statuses)
+        try container.encode(categories, forKey: .categories)
+        try container.encode(areas, forKey: .areas)
+        try container.encode(priorities, forKey: .priorities)
+        try container.encode(assignees, forKey: .assignees)
+        try container.encode(folders, forKey: .folders)
+        try container.encode(titleContains, forKey: .titleContains)
+        try container.encodeIfPresent(staleDays, forKey: .staleDays)
+        try container.encode(maxCount, forKey: .maxCount)
+        try container.encode(detail, forKey: .detail)
+        try container.encode(detail == .full, forKey: .includeSummary)
+        try container.encode(sort, forKey: .sort)
     }
 }

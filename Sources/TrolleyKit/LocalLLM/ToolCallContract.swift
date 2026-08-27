@@ -82,6 +82,23 @@ public enum ToolCallContract {
 
         """
         text += tools.map { "- " + $0.signature }.joined(separator: "\n")
+        // Before the screen-driving rules, not after them.
+        //
+        // Measured: asked about a wiki task with only titles in front of it, the 26B
+        // model called `launch_app` and then `snapshot` -- it took a question about a
+        // document as a reason to go find that document on screen. Everything above is
+        // about driving the Mac, so anything appended at the end reads as a footnote to
+        // that. Saying which questions are *not* screen questions has to come first, and
+        // has to say so in as many words.
+        if tools.contains(where: { $0.name == "wiki_read" }) {
+            text += """
+
+
+                위키(llmwiki) 질문은 화면을 조작해서 풀지 않는다. 앱을 켜거나 화면을 보지 않는다.
+                목록에 제목만 있으면 wiki_read 에 그 제목을 그대로 넣어 본문을 읽는다.
+                한 번에 한 건씩, 정말 필요한 것만 읽는다. 읽지 않은 문서의 내용은 말하지 않는다.
+                """
+        }
         if !runningApps.isEmpty {
             text += "\n\n지금 실행 중인 앱: " + runningApps.joined(separator: ", ")
         }

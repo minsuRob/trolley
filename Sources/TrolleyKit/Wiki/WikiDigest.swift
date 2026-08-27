@@ -67,10 +67,37 @@ public enum WikiDigestRenderer {
         let (kept, droppedByCount) = filter.apply(to: pages, today: today)
         let total = kept.count + droppedByCount
 
+        let columns: String
+        let caveat: String
+        switch filter.detail {
+        case .titles:
+            columns = "제목 · 상태"
+            // The strongest of the three, because this is the shape with the least to
+            // go on: handed only titles, the model will read a 담당 and a 기한 straight
+            // out of the title's own words unless it is told the list is this thin.
+            //
+            // It states the *limit* and says nothing about how to get past it. An
+            // earlier wording ended "해당 문서를 먼저 열어 확인하세요" and, probed against
+            // the 26B model, produced `launch_app` and then `snapshot` -- it read 열다
+            // as opening a document on screen and went off to drive Finder. How to look
+            // a page up belongs in `ToolCallContract.preamble`, which is the only place
+            // that knows whether a tool exists to do it: `trolley ask` wires none.
+            caveat = """
+                제목과 상태 외에는 아무 정보도 없습니다. 내용·담당·기한·진행 상황은 \
+                이 목록만으로는 알 수 없습니다. 확인하지 않은 내용은 추측해서 말하지 마세요.
+                """
+        case .metadata:
+            columns = "제목 · 상태 · 분류 · 우선순위 · 영역 · 담당 · 갱신일"
+            caveat = "요약과 본문은 포함되어 있지 않습니다. 목록에 없는 내용을 추측해서 말하지 마세요."
+        case .full:
+            columns = "제목 · 상태 · 분류 · 우선순위 · 영역 · 담당 · 갱신일 · 요약"
+            caveat = "본문은 포함되어 있지 않습니다. 목록에 없는 내용을 추측해서 말하지 마세요."
+        }
+
         let header = """
             [위키] \(rootName) — \(describe(filter)) (%MATCHED%/\(total)건)
-            아래는 참고용 목록입니다. 각 줄은 「제목 · 상태 · 분류 · 우선순위 · 영역 · 담당 · 갱신일\(filter.includeSummary ? " · 요약" : "")」입니다.
-            본문은 포함되어 있지 않습니다. 목록에 없는 내용을 추측해서 말하지 마세요.
+            아래는 참고용 목록입니다. 각 줄은 「\(columns)」입니다.
+            \(caveat)
 
 
             """
@@ -78,11 +105,20 @@ public enum WikiDigestRenderer {
         // The budget is spent on lines, so the header and a worst-case footer are
         // reserved before the first one is measured. Otherwise a list that just fits
         // would be pushed over by the note explaining that it did not.
-        let footerReserve = 40
+        //
+        // Built rather than guessed. A constant was right for the one-cause note this
+        // replaced and 9 characters short of the two-cause one, which overran the budget
+        // at `.titles` -- where the lines are short enough that the footer is a real
+        // fraction of it. Rendering the longest the footer could be keeps the two in
+        // step without anyone having to remember to.
+        let footerReserve = truncationNote(
+            droppedByCount: total, maxCount: filter.maxCount,
+            droppedByBudget: total, budgetCharacters: budgetCharacters
+        ).count
         var remaining = budgetCharacters - header.count - footerReserve
         var lines: [String] = []
         for page in kept {
-            let rendered = line(for: page, includeSummary: filter.includeSummary)
+            let rendered = line(for: page, detail: filter.detail)
             // Cut between records, never inside one: half a line is a page the model
             // cannot name and cannot look up.
             guard remaining - (rendered.count + 1) >= 0 else { break }
@@ -90,14 +126,21 @@ public enum WikiDigestRenderer {
             lines.append(rendered)
         }
 
-        let omitted = total - lines.count
+        let droppedByBudget = kept.count - lines.count
         var body = header.replacingOccurrences(of: "%MATCHED%", with: String(lines.count))
         body += lines.joined(separator: "\n")
-        if omitted > 0 {
-            // Always said out loud. A quietly shortened list is a lie to the model:
-            // it will answer "that is all of them" about a list it was never given.
-            body += "\n(예산 \(budgetCharacters)자 상한으로 \(omitted)건 생략됨 — 필터를 좁히면 전부 보입니다)"
-        }
+        // Always said out loud. A quietly shortened list is a lie to the model: it will
+        // answer "that is all of them" about a list it was never given.
+        //
+        // The two limits are named separately because they are two different dials and
+        // the person has to know which one to turn. At `.full` the budget is almost
+        // always the binding one; at `.titles` the lines are ~5x shorter and `maxCount`
+        // becomes it, so a single message blaming the budget would point at the wrong
+        // number exactly when the new default is in use.
+        body += truncationNote(
+            droppedByCount: droppedByCount, maxCount: filter.maxCount,
+            droppedByBudget: droppedByBudget, budgetCharacters: budgetCharacters
+        )
 
         return WikiDigest(
             text: body,
@@ -113,7 +156,13 @@ public enum WikiDigestRenderer {
     /// `[[…]]` because that is the vault's own link syntax and the basename is its
     /// identity key -- a title written this way is one the `wiki_read` tool can
     /// resolve, and one a person can paste straight into Obsidian.
-    public static func line(for page: WikiPage, includeSummary: Bool) -> String {
+    public static func line(for page: WikiPage, detail: WikiFilter.Detail) -> String {
+        // The status stays even at the thinnest level. It is four characters, and it is
+        // the difference between "what should I do" and "what did we do" -- a title list
+        // that cannot tell those apart is not worth the tokens it saved.
+        guard detail != .titles else {
+            return "- [[\(page.basename)]] · \(dash(page.status))"
+        }
         var fields = [
             "[[\(page.basename)]]",
             dash(page.status),
@@ -124,7 +173,7 @@ public enum WikiDigestRenderer {
             dash(page.assignee),
             dash(page.updated)
         ]
-        if includeSummary, !page.summary.isEmpty { fields.append(page.summary) }
+        if detail == .full, !page.summary.isEmpty { fields.append(page.summary) }
         return "- " + fields.joined(separator: " · ")
     }
 
@@ -147,6 +196,30 @@ public enum WikiDigestRenderer {
         if !filter.titleContains.isEmpty { parts.append("검색=\(filter.titleContains)") }
         if let stale = filter.staleDays { parts.append("정체≥\(stale)일") }
         return parts.isEmpty ? "전체" : parts.joined(separator: " · ")
+    }
+
+    /// What was cut and by which limit, or "" when nothing was.
+    ///
+    /// The two limits are named separately because they are two different dials and the
+    /// person has to know which one to turn. At `.full` the budget is almost always the
+    /// binding one; at `.titles` the lines are ~5x shorter and `maxCount` becomes it, so
+    /// a single message blaming the budget would point at the wrong number exactly when
+    /// the default filter is in use.
+    static func truncationNote(
+        droppedByCount: Int, maxCount: Int, droppedByBudget: Int, budgetCharacters: Int
+    ) -> String {
+        var cuts: [String] = []
+        if droppedByCount > 0 {
+            cuts.append("최대 건수 \(maxCount)건 상한으로 \(droppedByCount)건")
+        }
+        if droppedByBudget > 0 {
+            cuts.append("예산 \(budgetCharacters)자 상한으로 \(droppedByBudget)건")
+        }
+        guard !cuts.isEmpty else { return "" }
+        // The total leads, because it is the number that answers "how much am I not
+        // seeing" -- the breakdown after it answers "what do I turn".
+        let total = droppedByCount + droppedByBudget
+        return "\n(\(total)건 생략됨: \(cuts.joined(separator: ", ")) — 필터를 좁히면 전부 보입니다)"
     }
 
     static func dash(_ value: String) -> String { value.isEmpty ? "-" : value }

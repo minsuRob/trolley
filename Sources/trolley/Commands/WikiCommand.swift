@@ -66,8 +66,20 @@ struct WikiCommand: ParsableCommand {
     @Option(help: "Character budget for the digest.")
     var budget: Int?
 
-    @Flag(help: "Drop the 요약 column. The cheapest way to fit more pages.")
+    @Option(help: "Line detail: titles | metadata | full.")
+    var detail: WikiFilter.Detail?
+
+    @Flag(help: "Titles and 상태 only. Same as --detail titles.")
+    var titles = false
+
+    @Flag(help: "Drop the 요약 column. The old name for --detail metadata.")
     var noSummary = false
+
+    @Flag(help: "내 담당 · 진행중·대기 · 제목만. Uses the handle stored by --set-me.")
+    var mine = false
+
+    @Option(help: "Store the 담당 handle that 내 일감 means, and exit.")
+    var setMe: String?
 
     @Flag(help: "Store the filter options given on this command line and exit.")
     var saveFilter = false
@@ -95,6 +107,15 @@ struct WikiCommand: ParsableCommand {
             WikiSettings.isEnabled = enable
             print("위키 참고: \(WikiSettings.isEnabled ? "켜짐" : "꺼짐")")
             return
+        }
+        if let setMe {
+            WikiSettings.me = setMe
+            print("내 담당: \(WikiSettings.me.isEmpty ? "(지움)" : WikiSettings.me)")
+            return
+        }
+        // Better to stop than to quietly list everyone's work under the name 내 일감.
+        if mine, WikiSettings.me.isEmpty {
+            throw ValidationError("담당 핸들이 저장되어 있지 않습니다. --set-me <핸들> 로 먼저 지정하세요.")
         }
 
         let filter = resolvedFilter()
@@ -157,7 +178,17 @@ struct WikiCommand: ParsableCommand {
         if let search { filter.titleContains = search }
         if let stale { filter.staleDays = stale > 0 ? stale : nil }
         if let limit { filter.maxCount = limit }
-        if noSummary { filter.includeSummary = false }
+        if let detail { filter.detail = detail }
+        if titles { filter.detail = .titles }
+        // Guarded, so `--titles --no-summary` does not promote titles back up to
+        // metadata. The boolean this replaced could only ever say "not full".
+        if noSummary, filter.detail == .full { filter.detail = .metadata }
+        // Last, so it wins over the axes it sets.
+        if mine {
+            if !WikiSettings.me.isEmpty { filter.assignees = [WikiSettings.me] }
+            filter.statuses = ["진행중", "대기"]
+            filter.detail = .titles
+        }
         return filter
     }
 
@@ -175,7 +206,7 @@ struct WikiCommand: ParsableCommand {
         print("경로     : \(WikiSettings.rootPath)")
         print("사용     : \(WikiSettings.isEnabled ? "켜짐" : "꺼짐")")
         print("필터     : \(WikiDigestRenderer.describe(filter))")
-        print("정렬     : \(filter.sort.title) · 최대 \(filter.maxCount)건 · 요약 \(filter.includeSummary ? "포함" : "제외")")
+        print("정렬     : \(filter.sort.title) · 최대 \(filter.maxCount)건 · 상세 \(filter.detail.title)")
         print("스캔     : 파일 \(snapshot.scannedFiles)건 → 페이지 \(snapshot.pages.count)건" +
               (snapshot.skipped.isEmpty ? "" : " · 건너뜀 \(snapshot.skipped.count)건"))
         if snapshot.timedOut {
@@ -230,3 +261,7 @@ struct WikiCommand: ParsableCommand {
         }
     }
 }
+
+/// `RawRepresentable<String>` plus `CaseIterable` is all ArgumentParser needs -- it
+/// gets the parsing and the value list in `--help` for free.
+extension WikiFilter.Detail: ExpressibleByArgument {}

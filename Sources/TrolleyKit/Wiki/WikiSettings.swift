@@ -137,6 +137,34 @@ public enum WikiSettings {
         }
     }
 
+    // MARK: - Who "me" is
+
+    public static let meKey = "trolley.wiki.me"
+
+    /// The 담당 handle that means "me", for the 내 일감 preset.
+    ///
+    /// There is no way to derive this. The vault's 담당 values are GitHub handles and
+    /// the Mac knows only `NSUserName()`, a short user name; the `minsuRob` in
+    /// `Version.swift` is the release repo's owner, not whoever is running the build.
+    /// Guessing either would be wrong for two of this vault's three people, so it is
+    /// learned instead -- picking yourself in the 담당 popup and saving is what sets it.
+    ///
+    /// Deliberately does *not* `clearSent()`: this is not part of the digest.
+    public static var me: String {
+        get {
+            defaults.string(forKey: meKey)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        }
+        set {
+            let cleaned = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if cleaned.isEmpty {
+                defaults.removeObject(forKey: meKey)
+            } else {
+                defaults.set(cleaned, forKey: meKey)
+            }
+        }
+    }
+
     public static func clearSent() {
         defaults.removeObject(forKey: sentConversationKey)
         defaults.removeObject(forKey: sentHashKey)

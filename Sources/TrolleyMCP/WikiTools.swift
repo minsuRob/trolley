@@ -52,7 +52,11 @@ public struct WikiTools {
                     "priority": Schema.stringArray("우선순위: 최우선, 중간, 하순위."),
                     "assignee": Schema.stringArray("담당, a GitHub handle. Pass 미지정 for unassigned pages."),
                     "titleContains": Schema.string("Case-insensitive substring of the title or the summary."),
-                    "limit": Schema.integer("Most pages to return.", default: 40)
+                    "limit": Schema.integer("Most pages to return.", default: 40),
+                    "detail": Schema.string(
+                        "How much of each page to return: titles (title and 상태 only), "
+                        + "metadata (no 요약), or full. Defaults to full."
+                    )
                 ])
             ),
             ToolDefinition(
@@ -87,14 +91,19 @@ public struct WikiTools {
         filter.titleContains = args.optionalString("titleContains") ?? ""
         filter.maxCount = max(1, args.int("limit", default: 40))
 
+        // An unrecognised spelling falls back to the widest line rather than erroring:
+        // a wrong enum value should cost the agent a fatter answer, not a failed call.
+        let detail = WikiFilter.Detail(rawValue: args.optionalString("detail") ?? "") ?? .full
+
         let (kept, dropped) = filter.apply(to: snapshot.pages)
         let lines: [JSONValue] = kept.map { page in
-            JSONValue.string(WikiDigestRenderer.line(for: page, includeSummary: true))
+            JSONValue.string(WikiDigestRenderer.line(for: page, detail: detail))
         }
         var result: [String: JSONValue] = [:]
         result["matched"] = JSONValue.int(kept.count)
         result["total"] = JSONValue.int(kept.count + dropped)
         result["filter"] = JSONValue.string(WikiDigestRenderer.describe(filter))
+        result["detail"] = JSONValue.string(detail.rawValue)
         result["pages"] = JSONValue.array(lines)
         return .object(result)
     }

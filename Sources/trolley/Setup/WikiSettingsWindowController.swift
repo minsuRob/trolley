@@ -21,17 +21,26 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
     private let enabledCheckbox = NSButton(checkboxWithTitle: "위키 참고", target: nil, action: nil)
 
     private let typePopup = NSPopUpButton()
-    private let statusPopup = NSPopUpButton()
     private let categoryPopup = NSPopUpButton()
     private let priorityPopup = NSPopUpButton()
     private let areaField = NSTextField()
-    private let assigneeField = NSTextField()
+    private let assigneePopup = NSPopUpButton()
     private let searchField = NSTextField()
-    private let summaryCheckbox = NSButton(checkboxWithTitle: "요약 포함", target: nil, action: nil)
+    private let detailPopup = NSPopUpButton()
     private let sortPopup = NSPopUpButton()
     private let limitField = NSTextField()
     private let budgetField = NSTextField()
     private let folderCheckboxes: [(folder: String, button: NSButton)]
+    private let statusCheckboxes: [(status: String, button: NSButton)]
+    private let myWorkButton = NSButton(title: "내 일감", target: nil, action: nil)
+
+    /// Handles offered by 담당, held so the menu can be rebuilt without a rebuild being
+    /// visible as a flicker or a lost selection.
+    private var knownAssignees: [String] = []
+    /// What the stored filter had on the 담당 axis. A filter naming several people --
+    /// which only the CLI can write -- cannot be shown by a single-select popup, so it
+    /// is kept verbatim and handed back on save rather than silently widened to 전체.
+    private var storedAssignees: Set<String> = []
 
     private let summaryLabel = NSTextField(labelWithString: "")
     private let previewText = NSTextView()
@@ -41,13 +50,20 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
     private let container = NSView()
     private let rootStack = NSStackView()
 
-    /// The closed enums, from the vault's own `CLAUDE.md`. 영역 and 담당 are open sets
-    /// and are free text instead -- hard-coding them would drop a new teammate out of
-    /// the filter on the day they join.
+    /// The closed enums, from the vault's own `CLAUDE.md`. 영역 and 담당 are open sets:
+    /// 영역 is free text, and 담당 is a popup filled from the snapshot at display time --
+    /// hard-coding either would drop a new teammate out of the filter on the day they
+    /// join.
     private static let types = ["일감", "개념", "데일리", "회의", "사람"]
     private static let statuses = ["진행중", "대기", "보류", "완료"]
     private static let categories = ["버그", "기능", "인프라", "기획", "UX"]
     private static let priorities = ["최우선", "중간", "하순위"]
+
+    /// The two 담당 entries that are not handles. Named rather than typed twice, because
+    /// `refreshAssigneeMenu` rebuilds the menu and `currentAssignees` reads it back by
+    /// index -- the two have to agree about what sits above the separator.
+    private static let allAssignees = "전체"
+    private static let noAssignee = "미지정"
 
     /// `_private` is deliberately not here and cannot be switched on: the vault's rules
     /// exclude it from every index, and a rule that can be toggled eventually is.
@@ -74,6 +90,12 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
             defer: false
         )
         folderCheckboxes = Self.offerableFolders.map {
+            ($0, NSButton(checkboxWithTitle: $0, target: nil, action: nil))
+        }
+        // Checkboxes rather than the popup this replaced, because the default is now two
+        // statuses and a popup cannot say two. Same shape as `folderCheckboxes`, so the
+        // read and the write are the same one-liner.
+        statusCheckboxes = Self.statuses.map {
             ($0, NSButton(checkboxWithTitle: $0, target: nil, action: nil))
         }
         super.init()
@@ -142,8 +164,6 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
 
         enabledCheckbox.target = self
         enabledCheckbox.action = #selector(controlChanged)
-        summaryCheckbox.target = self
-        summaryCheckbox.action = #selector(controlChanged)
 
         // Deliberately not an NSBox. `NSBox.contentView = someAutoLayoutView` does not
         // constrain what it is handed, so the options stack was left unpositioned and
@@ -209,7 +229,7 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
 
     private func makeOptionsView() -> NSView {
         for (popup, values) in [
-            (typePopup, Self.types), (statusPopup, Self.statuses),
+            (typePopup, Self.types),
             (categoryPopup, Self.categories), (priorityPopup, Self.priorities)
         ] {
             popup.removeAllItems()
@@ -223,11 +243,23 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
 
         sortPopup.removeAllItems()
         sortPopup.addItems(withTitles: WikiFilter.Sort.allCases.map(\.title))
-        sortPopup.target = self
-        sortPopup.action = #selector(controlChanged)
-        sortPopup.controlSize = .small
 
-        for field in [areaField, assigneeField, searchField, limitField, budgetField] {
+        detailPopup.removeAllItems()
+        detailPopup.addItems(withTitles: WikiFilter.Detail.allCases.map(\.title))
+
+        // 전체 first for the same reason every other axis has it; 미지정 second because an
+        // absent 담당 is a real selection and not the absence of one. Real handles are
+        // appended by `refreshAssigneeMenu` from whatever the snapshot holds.
+        assigneePopup.removeAllItems()
+        assigneePopup.addItems(withTitles: [Self.allAssignees, Self.noAssignee])
+
+        for popup in [sortPopup, detailPopup, assigneePopup] {
+            popup.target = self
+            popup.action = #selector(controlChanged)
+            popup.controlSize = .small
+        }
+
+        for field in [areaField, searchField, limitField, budgetField] {
             field.controlSize = .small
             field.font = .systemFont(ofSize: 11)
             field.target = self
@@ -235,20 +267,30 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
             field.delegate = self
         }
         areaField.placeholderString = "전체 (쉼표로 구분: web, be)"
-        assigneeField.placeholderString = "전체 (쉼표로 구분, 미지정 가능)"
         searchField.placeholderString = "제목·요약에 포함된 말"
 
         let folderRow = NSStackView(views: folderCheckboxes.map(\.button))
         folderRow.orientation = .horizontal
         folderRow.spacing = 10
-        for (_, button) in folderCheckboxes {
+
+        let statusRow = NSStackView(views: statusCheckboxes.map(\.button))
+        statusRow.orientation = .horizontal
+        statusRow.spacing = 10
+
+        for (_, button) in folderCheckboxes + statusCheckboxes {
             button.target = self
             button.action = #selector(controlChanged)
             button.controlSize = .small
         }
 
+        myWorkButton.target = self
+        myWorkButton.action = #selector(applyMyWorkPreset)
+        myWorkButton.bezelStyle = .rounded
+        myWorkButton.controlSize = .small
+        myWorkButton.toolTip = "담당=나 · 진행중·대기 · 제목만"
+
         let limitRow = NSStackView(views: [
-            label("최대 건수"), limitField, label("문자 예산"), budgetField, summaryCheckbox
+            label("최대 건수"), limitField, label("문자 예산"), budgetField, myWorkButton
         ])
         limitRow.orientation = .horizontal
         limitRow.spacing = 6
@@ -256,10 +298,10 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
         budgetField.widthAnchor.constraint(equalToConstant: 64).isActive = true
 
         let grid = NSGridView(views: [
-            [label("유형"), typePopup, label("상태"), statusPopup],
-            [label("분류"), categoryPopup, label("우선순위"), priorityPopup],
-            [label("영역"), areaField, label("담당"), assigneeField],
-            [label("검색"), searchField, label("정렬"), sortPopup]
+            [label("유형"), typePopup, label("분류"), categoryPopup],
+            [label("영역"), areaField, label("우선순위"), priorityPopup],
+            [label("담당"), assigneePopup, label("정렬"), sortPopup],
+            [label("검색"), searchField, label("상세"), detailPopup]
         ])
         grid.rowSpacing = 7
         grid.columnSpacing = 8
@@ -270,7 +312,9 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
         // those labels stranded a hundred points from the control it names.
         grid.setContentHuggingPriority(.required, for: .horizontal)
 
-        let stack = NSStackView(views: [grid, label("폴더"), folderRow, limitRow])
+        let stack = NSStackView(views: [
+            grid, label("상태"), statusRow, label("폴더"), folderRow, limitRow
+        ])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8
@@ -303,25 +347,72 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
 
         let filter = WikiSettings.filter
         select(typePopup, filter.types)
-        select(statusPopup, filter.statuses)
         select(categoryPopup, filter.categories)
         select(priorityPopup, filter.priorities)
         areaField.stringValue = filter.areas.sorted().joined(separator: ", ")
-        assigneeField.stringValue = filter.assignees.sorted()
-            .map { $0.isEmpty ? "미지정" : $0 }
-            .joined(separator: ", ")
+        storedAssignees = filter.assignees
+        // No snapshot here on purpose: `populate` runs from `show()`, and `refreshPreview`
+        // is a line later with the real handles. Reading the vault to build a menu would
+        // put a disk walk in front of a window that may be about to show an error.
+        refreshAssigneeMenu(from: knownAssignees, selecting: filter.assignees)
         searchField.stringValue = filter.titleContains
-        summaryCheckbox.state = filter.includeSummary ? .on : .off
+        detailPopup.selectItem(at: WikiFilter.Detail.allCases.firstIndex(of: filter.detail) ?? 0)
         sortPopup.selectItem(at: WikiFilter.Sort.allCases.firstIndex(of: filter.sort) ?? 0)
         limitField.stringValue = String(filter.maxCount)
         budgetField.stringValue = String(WikiSettings.budgetCharacters)
         for (folder, button) in folderCheckboxes {
             button.state = filter.folders.contains(folder) ? .on : .off
         }
+        for (status, button) in statusCheckboxes {
+            button.state = filter.statuses.contains(status) ? .on : .off
+        }
     }
 
-    /// The popups hold one value each, so a filter carrying several on that axis --
-    /// which the CLI can write -- shows as 전체 rather than silently picking one.
+    /// Rebuilds 담당 from the snapshot without losing the current pick.
+    ///
+    /// The union with `selection` is the part that matters. A handle that has left the
+    /// vault -- or one the CLI wrote and no snapshot has shown yet -- still has to appear,
+    /// because a selection that quietly falls off the menu is a filter that quietly widens
+    /// the next time 저장 is pressed.
+    private func refreshAssigneeMenu(from handles: [String], selecting selection: Set<String>) {
+        let wasPopulating = isPopulating
+        isPopulating = true
+        defer { isPopulating = wasPopulating }
+
+        let merged = Set(handles).union(selection)
+            .filter { !$0.isEmpty }
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        guard merged != knownAssignees || assigneePopup.numberOfItems < 2 else {
+            selectAssignee(selection)
+            return
+        }
+        knownAssignees = merged
+        assigneePopup.removeAllItems()
+        assigneePopup.addItems(withTitles: [Self.allAssignees, Self.noAssignee])
+        if !merged.isEmpty {
+            assigneePopup.menu?.addItem(.separator())
+            assigneePopup.addItems(withTitles: merged)
+        }
+        selectAssignee(selection)
+    }
+
+    private func selectAssignee(_ selection: Set<String>) {
+        if selection.isEmpty { assigneePopup.selectItem(at: 0); return }
+        if selection == [""] { assigneePopup.selectItem(at: 1); return }
+        if selection.count == 1, let only = selection.first,
+           assigneePopup.itemTitles.contains(only) {
+            assigneePopup.selectItem(withTitle: only)
+            return
+        }
+        // Several people. The popup cannot say it, so it says 전체 and `currentAssignees`
+        // hands the stored set back untouched instead of widening it on save.
+        assigneePopup.selectItem(at: 0)
+    }
+
+    /// The closed-enum popups hold one value each, so a filter carrying several on that
+    /// axis -- which the CLI can write -- shows as 전체 rather than silently picking one.
+    /// 담당 has the same problem and its own version, `selectAssignee`, because its menu
+    /// is built at runtime.
     private func select(_ popup: NSPopUpButton, _ values: Set<String>) {
         guard values.count == 1, let only = values.first, popup.itemTitles.contains(only) else {
             popup.selectItem(at: 0)
@@ -333,17 +424,31 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
     private func currentFilter() -> WikiFilter {
         var filter = WikiSettings.filter
         filter.types = chosen(typePopup)
-        filter.statuses = chosen(statusPopup)
+        filter.statuses = Set(statusCheckboxes.filter { $0.button.state == .on }.map(\.status))
         filter.categories = chosen(categoryPopup)
         filter.priorities = chosen(priorityPopup)
         filter.areas = tokens(areaField.stringValue)
-        filter.assignees = Set(tokens(assigneeField.stringValue).map { $0 == "미지정" ? "" : $0 })
+        filter.assignees = currentAssignees()
         filter.titleContains = searchField.stringValue.trimmingCharacters(in: .whitespaces)
-        filter.includeSummary = summaryCheckbox.state == .on
+        filter.detail = WikiFilter.Detail.allCases[max(0, detailPopup.indexOfSelectedItem)]
         filter.sort = WikiFilter.Sort.allCases[max(0, sortPopup.indexOfSelectedItem)]
         filter.maxCount = max(1, Int(limitField.stringValue) ?? filter.maxCount)
         filter.folders = Set(folderCheckboxes.filter { $0.button.state == .on }.map(\.folder))
         return filter
+    }
+
+    private func currentAssignees() -> Set<String> {
+        switch assigneePopup.indexOfSelectedItem {
+        case 0:
+            // 전체 sitting on top of a multi-value stored filter means the popup could not
+            // show what is set, not that anyone cleared it. Actually picking 전체 goes
+            // through `controlChanged`, which clears `storedAssignees` first.
+            return storedAssignees.count > 1 ? storedAssignees : []
+        case 1:
+            return [""]
+        default:
+            return assigneePopup.titleOfSelectedItem.map { [$0] } ?? []
+        }
     }
 
     private func chosen(_ popup: NSPopUpButton) -> Set<String> {
@@ -397,13 +502,48 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
 
     @objc private func controlChanged() {
         guard !isPopulating else { return }
+        // A deliberate pick replaces whatever the CLI had written, 전체 included.
+        storedAssignees = currentAssignees()
         schedulePreview()
+    }
+
+    /// 담당=나 · 진행중·대기 · 제목만, as one press.
+    ///
+    /// The handle comes from `WikiSettings.me`, then from whatever 담당 is currently set
+    /// to, and if neither exists the preset applies the other two axes and leaves 담당
+    /// alone. Honest degradation: a wrong guess here would file someone else's work under
+    /// 내 일감, which is worse than a button that does two thirds of its job.
+    @objc private func applyMyWorkPreset() {
+        isPopulating = true
+        let stored = WikiSettings.me
+        let current = currentAssignees()
+        let handle = !stored.isEmpty
+            ? stored
+            : (current.count == 1 ? (current.first ?? "") : "")
+        if !handle.isEmpty {
+            refreshAssigneeMenu(from: knownAssignees, selecting: [handle])
+            storedAssignees = [handle]
+        }
+        for (status, button) in statusCheckboxes {
+            button.state = (status == "진행중" || status == "대기") ? .on : .off
+        }
+        detailPopup.selectItem(at: WikiFilter.Detail.allCases.firstIndex(of: .titles) ?? 0)
+        isPopulating = false
+        // Not debounced. A button press is not a keystroke, and the whole point of the
+        // preset is seeing the number drop.
+        refreshPreview()
     }
 
     @objc private func save() {
         WikiSettings.rootPath = pathField.stringValue
         WikiSettings.isEnabled = enabledCheckbox.state == .on
         WikiSettings.budgetCharacters = currentBudget()
+        // Whoever you keep filtering to is who 내 일감 means. Learned from the pick rather
+        // than asked for in a field of its own.
+        let picked = currentAssignees()
+        if picked.count == 1, let handle = picked.first, !handle.isEmpty {
+            WikiSettings.me = handle
+        }
         WikiSettings.filter = currentFilter()
         // Different filters are different content, so a conversation that already holds
         // the old list has to be handed the new one.
@@ -447,6 +587,10 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
             show(summary: "폴더를 읽지 못했습니다.", body: "")
             return
         }
+
+        // The snapshot the preview already needed, reused. `WikiIndex` gates rewalks at
+        // its revalidate interval, so this costs no extra disk.
+        refreshAssigneeMenu(from: snapshot.pages.map(\.assignee), selecting: filter.assignees)
 
         let digest = WikiDigestRenderer.render(
             pages: snapshot.pages, filter: filter,

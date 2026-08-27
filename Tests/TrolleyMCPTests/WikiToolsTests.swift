@@ -104,6 +104,40 @@ final class WikiToolsTests: XCTestCase {
         XCTAssertEqual(WikiTools.definitions.map(\.name), ["wiki_search", "wiki_read"])
     }
 
+    /// The local model has no tool-calling API, so `ToolCallContract` says the catalog in
+    /// prose and `ToolSummary.signature` renders these parameter names straight into the
+    /// prompt as the call signature. When they drift from the schema the model is being
+    /// told to make a call that `WikiTools` rejects, with no way to find that out -- which
+    /// is exactly what `wiki_read(path)` against a schema taking `title` was doing.
+    func testCatalogParameterNamesExistInTheSchemas() throws {
+        let provider = TrolleyTools(
+            trustChecker: FakeTrustChecker(),
+            locator: FakeAppLocator(),
+            makeKeyPoster: { _ in FakeKeyPoster() },
+            makeRoot: { _, _ in FakeElement() },
+            activateApp: { _ in true },
+            listRunningApps: { [] },
+            wiki: tools
+        )
+        let catalog = TrolleyToolRunner(tools: provider).toolCatalog
+        for definition in WikiTools.definitions {
+            let summary = try XCTUnwrap(
+                catalog.first { $0.name == definition.name },
+                "\(definition.name) 이 카탈로그에 없다"
+            )
+            guard case .object(let schema) = definition.inputSchema,
+                  case .object(let properties)? = schema["properties"] else {
+                return XCTFail("\(definition.name) 스키마 모양이 다르다")
+            }
+            for parameter in summary.parameters {
+                XCTAssertNotNil(
+                    properties[parameter],
+                    "\(definition.name)(\(parameter)) — 스키마에 없는 인자를 모델에게 알려주고 있다"
+                )
+            }
+        }
+    }
+
     /// A listed tool that cannot work costs the model a call to find that out, so the
     /// pair is absent rather than broken when no wiki is injected.
     func testToolsAreAbsentWhenNoWikiIsInjected() {
