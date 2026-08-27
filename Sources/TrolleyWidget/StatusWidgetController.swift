@@ -62,6 +62,10 @@ public final class StatusWidgetController {
     private static let originDefaultsKey = "trolley.widget.origin"
     private static let widgetSize: CGFloat = 72
     private static let badgeDisplaySeconds: TimeInterval = 2.5
+    /// How long a count of 내 일감 is trusted for. Five seconds, matching the setup
+    /// window's wiki and LLM probes -- the number moves when someone edits a page, which
+    /// is not something worth re-walking a folder for on every tool call.
+    private static let wikiCheckInterval: TimeInterval = 5
 
     private let panel: WidgetPanel
     private let iconView: WidgetContentView
@@ -89,6 +93,23 @@ public final class StatusWidgetController {
     public var onUpdateAction: (() -> Void)? {
         didSet { activityPanel.onUpdateAction = onUpdateAction }
     }
+
+    /// Opens the wiki window. Same arrangement as `onUpdateAction`: this module owns no
+    /// windows, so the panel's 위키 열기 button exists only for a host that has one.
+    public var onOpenWiki: (() -> Void)? {
+        didSet {
+            activityPanel.onOpenWiki = onOpenWiki
+            // The button starts with no count. Filling it in walks the vault, so it
+            // waits for the throttle like everything else that touches that folder.
+            refreshWikiButtonIfDue()
+        }
+    }
+
+    /// When the vault was last counted, and whether a count is in the air. Same shape as
+    /// the setup window's `checkLLMIfDue`, and for the same reason: this runs off the
+    /// panel's refresh, which fires on every tool call.
+    private var lastWikiCheck: Date?
+    private var wikiCheckInFlight = false
 
     /// - Parameter onQuit: what "위젯 종료" does. Injected so this module never
     ///   decides how the process dies.
@@ -253,6 +274,7 @@ public final class StatusWidgetController {
         }
         render(state)
         activityPanel.refreshIfVisible(makePanelModel())
+        refreshWikiButtonIfDue()
     }
 
     private func render(_ state: WidgetState) {
@@ -343,6 +365,8 @@ public final class StatusWidgetController {
     ///   behalf, where taking the keyboard would be an interruption.
     public func presentPromptPanel(focus: Bool) {
         activityPanel.present(makePanelModel())
+        // The one moment the count is certainly being looked at.
+        refreshWikiButtonIfDue()
         guard focus else { return }
         if NSApp.isActive {
             activityPanel.focusPromptField()
@@ -430,6 +454,38 @@ public final class StatusWidgetController {
         updateBadge.toolTip = status.summary
         activityPanel.showUpdate(status: status)
         activityPanel.refreshIfVisible(makePanelModel())
+    }
+
+    /// Recounts 내 일감 and retitles the panel's 위키 열기 button, at most once every
+    /// five seconds.
+    ///
+    /// **The count runs off the main thread**, and that is not an optimisation. The vault
+    /// sits under `~/Desktop`, which macOS gates even for an unsandboxed app; a walk that
+    /// begins while the consent sheet is still unanswered blocks inside `open()` with no
+    /// error and no log. On the main thread that is the whole panel frozen, prompt box
+    /// included, for as long as the sheet goes unnoticed -- and trolley is `.accessory`,
+    /// so that sheet does not always come to the front.
+    ///
+    /// The throttle is what makes this safe to call from `apply(_:)`, which fires on
+    /// every single tool call.
+    private func refreshWikiButtonIfDue() {
+        guard onOpenWiki != nil, !wikiCheckInFlight else { return }
+        if let last = lastWikiCheck, Date().timeIntervalSince(last) < Self.wikiCheckInterval {
+            return
+        }
+        lastWikiCheck = Date()
+        wikiCheckInFlight = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let available = WikiSettings.rootIsReadable
+            // Nil for "no handle learned yet" as well as for "no vault"; the button only
+            // needs to know it has no number to show.
+            let count = available ? WikiWorkload.myCount() : nil
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.wikiCheckInFlight = false
+                self.activityPanel.showWiki(available: available, myCount: count)
+            }
+        }
     }
 
     /// Starts listening for prompts sent by `trolley prompt`.

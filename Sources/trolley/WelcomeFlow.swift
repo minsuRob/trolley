@@ -91,6 +91,13 @@ enum WelcomeFlow {
         controller.acceptRemotePrompts()
         controller.show()
 
+        // Only the app wires this, so the same pet drawn by `trolley mcp --widget` shows
+        // no 위키 열기 button: that process owns no windows to open. The callback is the
+        // one the menu bar and the setup window already use, which is what keeps a single
+        // `WikiWindowController` -- and the conversation inside it -- alive across all
+        // three ways in.
+        controller.onOpenWiki = { openWiki() }
+
         startUpdateChecks(reporting: controller)
 
         // The menu bar is the way in for someone who has not been told the folder

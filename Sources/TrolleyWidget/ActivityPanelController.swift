@@ -128,6 +128,13 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         didSet { updateButton.isHidden = onUpdateAction == nil }
     }
 
+    /// Opens the wiki window. Nil in a host that has none -- `trolley mcp --widget` draws
+    /// the same pet but owns no windows -- and the button is then not shown at all rather
+    /// than shown dead, the same rule the gear and the update button follow.
+    var onOpenWiki: (() -> Void)? {
+        didSet { wikiButton.isHidden = onOpenWiki == nil }
+    }
+
     private let panel: NSPanel
     private let widgetPanel: NSPanel
     private let stack = NSStackView()
@@ -176,6 +183,7 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
     private let llmStatusLabel = ActivityPanelController.makeLabel(Style.caption, .secondaryLabelColor)
     private let stopButton = PanelButton()
     private let settingsButton = PanelButton()
+    private let wikiButton = NSButton()
     private let updateButton = NSButton()
 
     private let timeFormatter: DateFormatter = {
@@ -316,6 +324,24 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         onUpdateAction?()
     }
 
+    @objc private func wikiTapped() {
+        onOpenWiki?()
+    }
+
+    /// Retitles the wiki button from what the host counted.
+    ///
+    /// - Parameter available: whether there is a readable vault behind it. False hides
+    ///   the button rather than greying it, which is what the menu bar does with its
+    ///   위키 item for the same reason: a disabled control promises something can be done
+    ///   here, and nothing about a missing folder can be done from this panel.
+    /// - Parameter myCount: nil when no 담당 handle has been learned yet. See
+    ///   `WikiButtonCopy` for why that is not 0.
+    func showWiki(available: Bool, myCount: Int?) {
+        wikiButton.isHidden = onOpenWiki == nil || !available
+        wikiButton.title = WikiButtonCopy.title(myCount: myCount)
+        wikiButton.toolTip = WikiButtonCopy.tooltip(myCount: myCount)
+    }
+
     /// Retitles the button from the status. A finished download turns it into
     /// the install action; everything else leaves it as the check it was, so the
     /// button never disappears out from under a cursor already on its way.
@@ -378,6 +404,20 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         // Until a host assigns the callback there is nothing behind it.
         settingsButton.isHidden = true
 
+        // Bordered like the update button beside it, and deliberately never tinted:
+        // `bezelColor` is the one bit of emphasis this row has and it belongs to an
+        // update waiting to be installed. A count that is merely non-zero is not news.
+        wikiButton.title = WikiButtonCopy.title(myCount: nil)
+        wikiButton.font = Style.caption
+        wikiButton.bezelStyle = .rounded
+        wikiButton.controlSize = .small
+        wikiButton.toolTip = WikiButtonCopy.tooltip(myCount: nil)
+        wikiButton.target = self
+        wikiButton.action = #selector(wikiTapped)
+        wikiButton.setContentHuggingPriority(.required, for: .horizontal)
+        // Nothing behind it until a host wires the callback -- same rule as the gear.
+        wikiButton.isHidden = true
+
         // Bordered, unlike the two icons beside it: this one is a verb rather
         // than a destination, and the border is what says it can be pressed. The
         // icons get away without one because their symbols are already known.
@@ -396,7 +436,12 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
         // Top left, ahead of the title: where a window's close button lives. The
         // gear sits beside it because the pet's right-click menu was the only
         // way in, and a menu you have to know about is not a way in.
-        let leading = NSStackView(views: [close, settingsButton, title, updateButton])
+        //
+        // 위키 열기 is ahead of 업데이트 확인 because it is the one that gets pressed:
+        // the wiki is somewhere you go, an update is something you occasionally accept.
+        let leading = NSStackView(
+            views: [close, settingsButton, title, wikiButton, updateButton]
+        )
         leading.orientation = .horizontal
         leading.alignment = .centerY
         leading.spacing = 6
