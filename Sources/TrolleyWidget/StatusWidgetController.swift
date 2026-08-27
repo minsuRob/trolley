@@ -503,7 +503,13 @@ public final class StatusWidgetController {
         }
         lastWikiCheck = Date()
         wikiCheckInFlight = true
-        DispatchQueue.global(qos: .utility).async { [weak self] in
+        // Not `.utility`: measured, that QoS gets descheduled enough that WikiIndex's
+        // 150ms walk deadline trips before this vault's ~190 files finish scanning --
+        // the count then silently reflects whatever alphabetical prefix got walked (2
+        // or 3 pages) instead of the true count (10). `.userInitiated` is what
+        // `WikiWindowController.reloadList` already uses for the identical walk, and
+        // it reliably finishes inside the deadline.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let available = WikiSettings.rootIsReadable
             // Nil for "no handle learned yet" as well as for "no vault"; the button only
             // needs to know it has no number to show.
