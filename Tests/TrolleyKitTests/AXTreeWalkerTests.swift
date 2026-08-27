@@ -67,3 +67,48 @@ final class AXTreeWalkerTests: XCTestCase {
         XCTAssertTrue(matches[0].parent === parent)
     }
 }
+
+/// `dump-tree --frames`: the fact that makes a layout checkable without a second
+/// automation stack beside trolley's own.
+final class AXTreeDumperFrameTests: XCTestCase {
+    func testAnElementWithNoGeometryIsSaidToHaveNone() {
+        XCTAssertEqual(AXTreeDumper.frameField(position: nil, size: nil), "frame=?")
+    }
+
+    /// Halves are what a Retina screen hands back, and nobody verifies a layout to half
+    /// a point.
+    func testPointsAreRounded() {
+        XCTAssertEqual(
+            AXTreeDumper.frameField(
+                position: CGPoint(x: 489.5, y: 107.4), size: CGSize(width: 939.5, height: 652)
+            ),
+            "frame=490,107 940x652"
+        )
+    }
+
+    /// One half missing is not both missing: a column reports a size and no position.
+    func testAHalfKnownFrameStillSaysWhatItKnows() {
+        XCTAssertEqual(
+            AXTreeDumper.frameField(position: nil, size: CGSize(width: 96, height: 24)),
+            "frame=? 96x24"
+        )
+    }
+
+    func testTheWalkCarriesFramesOnlyWhenAsked() {
+        let element = MockAXElement(role: "AXWindow", title: "위키")
+        element.attributes[AXAttr.position] = axValue(CGPoint(x: 10, y: 20), .cgPoint)
+        element.attributes[AXAttr.size] = axValue(CGSize(width: 100, height: 50), .cgSize)
+        let limits = AXTraversalLimits(maxDepth: 2)
+
+        let plain = AXTreeDumper().dump(root: element, limits: limits)
+        XCTAssertFalse(plain.contains("frame="), plain)
+
+        let framed = AXTreeDumper().dump(root: element, limits: limits, includeFrames: true)
+        XCTAssertTrue(framed.contains("frame=10,20 100x50"), framed)
+    }
+
+    private func axValue<T>(_ value: T, _ type: AXValueType) -> AnyObject {
+        var copy = value
+        return AXValueCreate(type, &copy)!
+    }
+}
