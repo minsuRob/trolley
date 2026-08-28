@@ -65,6 +65,18 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
     private let statusLabel = NSTextField(labelWithString: "")
     private let newThreadButton = NSButton(title: "새 대화", target: nil, action: nil)
 
+    // Claude 호출 -- a second destination for whatever is typed in `promptField`,
+    // alongside the local wiki LLM that ⏎ already sends it to. One button because
+    // one press should be able to fan out to everything checked; checkboxes rather
+    // than a picker because more than one at once is the point (copy-chat's own
+    // `--to` fallback is "try the next idle one", not "pick exactly one channel").
+    private let terminalCheckbox = NSButton(checkboxWithTitle: "터미널", target: nil, action: nil)
+    private let orcaCheckbox = NSButton(checkboxWithTitle: "orca 배분", target: nil, action: nil)
+    private let desktopCheckbox = NSButton(checkboxWithTitle: "Claude Desktop", target: nil, action: nil)
+    private let claudeInvokeButton = NSButton(title: "Claude 호출", target: nil, action: nil)
+    private let claudeInvokeStatusLabel = NSTextField(labelWithString: "")
+    private let claudeInvokeDispatcher = ClaudeInvokeDispatcher.makeDefault()
+
     /// The rows on screen, in the order the sort put them.
     private var pages: [WikiPage] = []
     private var openPage: WikiPage?
@@ -127,6 +139,7 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
         }
         // The options window's 내 일감 can move 담당 while this one is closed.
         restoreToolbar()
+        restoreClaudeInvokeRow()
         reloadList()
         window.makeKeyAndOrderFront(nil)
         restoreListWidth()
@@ -319,7 +332,33 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
         statusRow.orientation = .horizontal
         statusRow.spacing = 8
 
-        let bottom = NSStackView(views: [promptField, statusRow, answerScroll])
+        for (checkbox, isOn) in [
+            (terminalCheckbox, ClaudeInvokeSettings.terminalEnabled),
+            (orcaCheckbox, ClaudeInvokeSettings.orcaEnabled),
+            (desktopCheckbox, ClaudeInvokeSettings.desktopEnabled)
+        ] {
+            checkbox.state = isOn ? .on : .off
+            checkbox.target = self
+            checkbox.action = #selector(claudeInvokeMethodToggled)
+            checkbox.controlSize = .small
+        }
+        claudeInvokeButton.bezelStyle = .rounded
+        claudeInvokeButton.controlSize = .small
+        claudeInvokeButton.target = self
+        claudeInvokeButton.action = #selector(invokeClaude)
+        claudeInvokeStatusLabel.font = .systemFont(ofSize: 10)
+        claudeInvokeStatusLabel.textColor = .secondaryLabelColor
+        claudeInvokeStatusLabel.lineBreakMode = .byTruncatingTail
+
+        let claudeInvokeRow = NSStackView(views: [
+            terminalCheckbox, orcaCheckbox, desktopCheckbox, NSView(), claudeInvokeButton
+        ])
+        claudeInvokeRow.orientation = .horizontal
+        claudeInvokeRow.spacing = 8
+
+        let bottom = NSStackView(views: [
+            promptField, claudeInvokeRow, claudeInvokeStatusLabel, statusRow, answerScroll
+        ])
         bottom.orientation = .vertical
         bottom.alignment = .leading
         bottom.spacing = 6
@@ -342,6 +381,8 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
             columns.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -28),
             bottom.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -28),
             promptField.widthAnchor.constraint(equalTo: bottom.widthAnchor),
+            claudeInvokeRow.widthAnchor.constraint(equalTo: bottom.widthAnchor),
+            claudeInvokeStatusLabel.widthAnchor.constraint(equalTo: bottom.widthAnchor),
             statusRow.widthAnchor.constraint(equalTo: bottom.widthAnchor),
             answerScroll.widthAnchor.constraint(equalTo: bottom.widthAnchor),
             columns.heightAnchor.constraint(greaterThanOrEqualToConstant: 320)
@@ -832,6 +873,77 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
         statusLabel.stringValue = LocalLLMSession.statusLine(
             for: session.phase, backend: session.backend
         )
+    }
+
+    // MARK: - Claude 호출
+
+    /// Written the moment a checkbox moves, like the toolbar dropdowns above --
+    /// no 저장 button, because picking methods right before pressing 호출 is not
+    /// filling out a form.
+    @objc private func claudeInvokeMethodToggled() {
+        ClaudeInvokeSettings.terminalEnabled = terminalCheckbox.state == .on
+        ClaudeInvokeSettings.orcaEnabled = orcaCheckbox.state == .on
+        ClaudeInvokeSettings.desktopEnabled = desktopCheckbox.state == .on
+    }
+
+    /// Reapplies the checkboxes' remembered state -- the settings window can
+    /// change the per-method options while this window is closed, and the
+    /// checkboxes themselves can be toggled here and should still read back
+    /// the same on the next `show()`.
+    private func restoreClaudeInvokeRow() {
+        terminalCheckbox.state = ClaudeInvokeSettings.terminalEnabled ? .on : .off
+        orcaCheckbox.state = ClaudeInvokeSettings.orcaEnabled ? .on : .off
+        desktopCheckbox.state = ClaudeInvokeSettings.desktopEnabled ? .on : .off
+    }
+
+    @objc private func invokeClaude() {
+        let text = promptField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+
+        var methods: [ClaudeInvokeMethod] = []
+        if terminalCheckbox.state == .on { methods.append(.terminal) }
+        if orcaCheckbox.state == .on { methods.append(.orca) }
+        if desktopCheckbox.state == .on { methods.append(.desktop) }
+        guard !methods.isEmpty else {
+            claudeInvokeStatusLabel.stringValue = "보낼 방식을 하나 이상 선택하세요."
+            return
+        }
+
+        let prompt = ClaudeInvokePromptBuilder.compose(
+            userText: text,
+            pageTitle: openPage?.basename,
+            pageBody: openBody,
+            attachContext: ClaudeInvokeSettings.attachWikiContext && openPage != nil
+        )
+
+        claudeInvokeButton.isEnabled = false
+        claudeInvokeStatusLabel.stringValue = "호출하는 중…"
+        claudeInvokeDispatcher.invoke(
+            prompt: prompt,
+            methods: methods,
+            confirm: { [weak self] message in
+                guard let self else { return false }
+                // Called from the dispatcher's background queue; NSAlert needs
+                // the main thread, and the background side is free to block on
+                // it since it is not itself holding anything main needs.
+                return DispatchQueue.main.sync { self.confirmSend(message) }
+            }
+        ) { [weak self] results in
+            guard let self else { return }
+            self.claudeInvokeButton.isEnabled = true
+            self.claudeInvokeStatusLabel.stringValue = results
+                .map { "\($0.success ? "✓" : "✗") \($0.message)" }
+                .joined(separator: "  ·  ")
+        }
+    }
+
+    private func confirmSend(_ message: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Claude 호출"
+        alert.informativeText = message
+        alert.addButton(withTitle: "보내기")
+        alert.addButton(withTitle: "취소")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 }
 

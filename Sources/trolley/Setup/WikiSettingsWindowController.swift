@@ -39,6 +39,21 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
     private let statusCheckboxes: [(status: String, button: NSButton)]
     private let myWorkButton = NSButton(title: "내 일감", target: nil, action: nil)
 
+    // Claude 호출 -- the per-method knobs behind the wiki window's checkboxes.
+    // Which methods are checked lives on that window's toolbar instead, written
+    // the moment they're toggled; these are tuned once and forgotten, so they
+    // ride this window's own 저장/취소 like everything else on this page.
+    private let attachContextCheckbox = NSButton(
+        checkboxWithTitle: "위키 문서를 맥락으로 첨부", target: nil, action: nil
+    )
+    private let orcaConfirmCheckbox = NSButton(
+        checkboxWithTitle: "보내기 전 확인", target: nil, action: nil
+    )
+    private let orcaTargetField = NSTextField()
+    private let desktopAutoSubmitCheckbox = NSButton(
+        checkboxWithTitle: "붙여넣은 뒤 Enter 자동 전송", target: nil, action: nil
+    )
+
     private let summaryLabel = NSTextField(labelWithString: "")
     private let previewText = NSTextView()
     private let previewScroll = NSScrollView()
@@ -169,6 +184,7 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
         // filter control landed on top of something else and half of them could not be
         // clicked at all. A plain heading is also what 위키 폴더 and 미리보기 already use.
         let optionsView = makeOptionsView()
+        let claudeInvokeView = makeClaudeInvokeView()
 
         summaryLabel.font = .systemFont(ofSize: 11, weight: .medium)
         summaryLabel.textColor = .secondaryLabelColor
@@ -206,6 +222,7 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
         for view in [
             heading("위키 폴더"), pathRow,
             heading("기본 목록"), filterNote, optionsView,
+            heading("Claude 호출"), claudeInvokeView,
             heading("미리보기"), summaryLabel, previewScroll, buttonRow
         ] {
             rootStack.addArrangedSubview(view)
@@ -213,6 +230,7 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
 
         container.addSubview(rootStack)
         NSLayoutConstraint.activate([
+            claudeInvokeView.widthAnchor.constraint(equalTo: rootStack.widthAnchor, constant: -36),
             rootStack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             rootStack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             rootStack.topAnchor.constraint(equalTo: container.topAnchor),
@@ -316,6 +334,35 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
         return stack
     }
 
+    private func makeClaudeInvokeView() -> NSView {
+        for checkbox in [attachContextCheckbox, orcaConfirmCheckbox, desktopAutoSubmitCheckbox] {
+            checkbox.controlSize = .small
+            checkbox.target = self
+            checkbox.action = #selector(controlChanged)
+        }
+
+        orcaTargetField.controlSize = .small
+        orcaTargetField.font = .systemFont(ofSize: 11)
+        orcaTargetField.placeholderString = "비우면 첫 유휴 창 자동 선택"
+        orcaTargetField.target = self
+        orcaTargetField.action = #selector(controlChanged)
+        orcaTargetField.delegate = self
+
+        let orcaTargetRow = NSStackView(views: [label("orca 대상"), orcaTargetField])
+        orcaTargetRow.orientation = .horizontal
+        orcaTargetRow.spacing = 6
+        orcaTargetField.widthAnchor.constraint(equalToConstant: 220).isActive = true
+
+        let stack = NSStackView(views: [
+            attachContextCheckbox, orcaConfirmCheckbox, orcaTargetRow, desktopAutoSubmitCheckbox
+        ])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 2, left: 10, bottom: 4, right: 0)
+        return stack
+    }
+
     private func heading(_ text: String) -> NSTextField {
         let field = NSTextField(labelWithString: text)
         field.font = .systemFont(ofSize: 12, weight: .semibold)
@@ -353,6 +400,10 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
         for (status, button) in statusCheckboxes {
             button.state = filter.statuses.contains(status) ? .on : .off
         }
+        attachContextCheckbox.state = ClaudeInvokeSettings.attachWikiContext ? .on : .off
+        orcaConfirmCheckbox.state = ClaudeInvokeSettings.orcaConfirmBeforeSend ? .on : .off
+        orcaTargetField.stringValue = ClaudeInvokeSettings.orcaTargetHandle
+        desktopAutoSubmitCheckbox.state = ClaudeInvokeSettings.desktopAutoSubmit ? .on : .off
     }
 
     /// The closed-enum popups hold one value each, so a filter carrying several on that
@@ -508,6 +559,10 @@ final class WikiSettingsWindowController: NSObject, NSWindowDelegate {
         // `WikiSettings.me` used to be learned here, from the 담당 pick. That popup lives
         // on the wiki window now and learns there, the moment a handle is chosen.
         WikiSettings.filter = currentFilter()
+        ClaudeInvokeSettings.attachWikiContext = attachContextCheckbox.state == .on
+        ClaudeInvokeSettings.orcaConfirmBeforeSend = orcaConfirmCheckbox.state == .on
+        ClaudeInvokeSettings.orcaTargetHandle = orcaTargetField.stringValue
+        ClaudeInvokeSettings.desktopAutoSubmit = desktopAutoSubmitCheckbox.state == .on
         WikiIndex.shared.invalidate()
         WikiContext.shared.invalidate()
         if let root = WikiSettings.rootURL { WikiIndex.shared.prewarm(root: root) }
