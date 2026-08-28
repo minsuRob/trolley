@@ -3,8 +3,7 @@ import XCTest
 
 final class ClaudeInvokeSettingsTests: XCTestCase {
     private static let keys = [
-        ClaudeInvokeSettings.terminalEnabledKey, ClaudeInvokeSettings.orcaEnabledKey,
-        ClaudeInvokeSettings.desktopEnabledKey, ClaudeInvokeSettings.attachWikiContextKey,
+        ClaudeInvokeSettings.invokeMethodKey, ClaudeInvokeSettings.attachWikiContextKey,
         ClaudeInvokeSettings.orcaConfirmKey, ClaudeInvokeSettings.orcaTargetHandleKey,
         ClaudeInvokeSettings.desktopAutoSubmitKey
     ]
@@ -24,11 +23,13 @@ final class ClaudeInvokeSettingsTests: XCTestCase {
         body()
     }
 
-    func testMethodsDefaultOff() {
+    func testInvokeMethodDefaultsToTerminalAndRoundTrips() {
         withCleanDefaults {
-            XCTAssertFalse(ClaudeInvokeSettings.terminalEnabled)
-            XCTAssertFalse(ClaudeInvokeSettings.orcaEnabled)
-            XCTAssertFalse(ClaudeInvokeSettings.desktopEnabled)
+            XCTAssertEqual(ClaudeInvokeSettings.invokeMethod, .terminal)
+            ClaudeInvokeSettings.invokeMethod = .orca
+            XCTAssertEqual(ClaudeInvokeSettings.invokeMethod, .orca)
+            ClaudeInvokeSettings.invokeMethod = .desktop
+            XCTAssertEqual(ClaudeInvokeSettings.invokeMethod, .desktop)
         }
     }
 
@@ -51,9 +52,9 @@ final class ClaudeInvokeSettingsTests: XCTestCase {
 
     func testTogglesPersist() {
         withCleanDefaults {
-            ClaudeInvokeSettings.orcaEnabled = true
+            ClaudeInvokeSettings.invokeMethod = .orca
             ClaudeInvokeSettings.orcaConfirmBeforeSend = false
-            XCTAssertTrue(ClaudeInvokeSettings.orcaEnabled)
+            XCTAssertEqual(ClaudeInvokeSettings.invokeMethod, .orca)
             XCTAssertFalse(ClaudeInvokeSettings.orcaConfirmBeforeSend)
         }
     }

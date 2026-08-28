@@ -65,14 +65,14 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
     private let statusLabel = NSTextField(labelWithString: "")
     private let newThreadButton = NSButton(title: "새 대화", target: nil, action: nil)
 
-    // Claude 호출 -- a second destination for whatever is typed in `promptField`,
-    // alongside the local wiki LLM that ⏎ already sends it to. One button because
-    // one press should be able to fan out to everything checked; checkboxes rather
-    // than a picker because more than one at once is the point (copy-chat's own
-    // `--to` fallback is "try the next idle one", not "pick exactly one channel").
-    private let terminalCheckbox = NSButton(checkboxWithTitle: "터미널", target: nil, action: nil)
-    private let orcaCheckbox = NSButton(checkboxWithTitle: "orca 배분", target: nil, action: nil)
-    private let desktopCheckbox = NSButton(checkboxWithTitle: "Claude Desktop", target: nil, action: nil)
+    // Claude 호출 -- a separate destination from the local wiki LLM `promptField` talks
+    // to, with its own prompt box so the two conversations never share one text field.
+    // Radio buttons rather than checkboxes: a person picks exactly one way to reach
+    // Claude at a time, not a fan-out to everything checked.
+    private let terminalRadio = NSButton(radioButtonWithTitle: "터미널", target: nil, action: nil)
+    private let orcaRadio = NSButton(radioButtonWithTitle: "orca 배분", target: nil, action: nil)
+    private let desktopRadio = NSButton(radioButtonWithTitle: "Claude Desktop", target: nil, action: nil)
+    private let claudeInvokePromptField = NSTextField()
     private let claudeInvokeButton = NSButton(title: "Claude 호출", target: nil, action: nil)
     private let claudeInvokeStatusLabel = NSTextField(labelWithString: "")
     private let claudeInvokeDispatcher = ClaudeInvokeDispatcher.makeDefault()
@@ -219,6 +219,23 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
             column.resizingMask = identifier == "title" ? [] : [.userResizingMask]
             table.addTableColumn(column)
         }
+        // A fourth, fixed-width column that is a button rather than text -- the quick way
+        // to hand a row straight to Claude without opening it first. Cell-based like the
+        // three text columns above it (a hover-revealed button would need the whole table
+        // rebuilt as view-based rows), so it stays a plain `NSButtonCell`.
+        let invokeColumn = NSTableColumn(identifier: .init("invoke"))
+        invokeColumn.title = ""
+        invokeColumn.width = 56
+        invokeColumn.minWidth = 56
+        invokeColumn.maxWidth = 56
+        invokeColumn.resizingMask = []
+        let invokeCell = NSButtonCell()
+        invokeCell.title = "실행"
+        invokeCell.bezelStyle = .inline
+        invokeCell.controlSize = .mini
+        invokeCell.font = .systemFont(ofSize: 10)
+        invokeColumn.dataCell = invokeCell
+        table.addTableColumn(invokeColumn)
         // After the columns exist, never before: `autosaveName` restores widths for the
         // columns the table holds at the moment it is set, and a table that holds none
         // yet restores nothing -- then saves its defaults over what was stored, which is
@@ -332,16 +349,22 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
         statusRow.orientation = .horizontal
         statusRow.spacing = 8
 
-        for (checkbox, isOn) in [
-            (terminalCheckbox, ClaudeInvokeSettings.terminalEnabled),
-            (orcaCheckbox, ClaudeInvokeSettings.orcaEnabled),
-            (desktopCheckbox, ClaudeInvokeSettings.desktopEnabled)
-        ] {
-            checkbox.state = isOn ? .on : .off
-            checkbox.target = self
-            checkbox.action = #selector(claudeInvokeMethodToggled)
-            checkbox.controlSize = .small
+        let bottom = NSStackView(views: [promptField, statusRow, answerScroll])
+        bottom.orientation = .vertical
+        bottom.alignment = .leading
+        bottom.spacing = 6
+
+        // -- Claude 호출, just under the search row: its own radio group and its own
+        // prompt box, entirely separate from the local wiki LLM's `promptField` below.
+        for radio in [terminalRadio, orcaRadio, desktopRadio] {
+            radio.target = self
+            radio.action = #selector(claudeInvokeMethodToggled)
+            radio.controlSize = .small
         }
+        claudeInvokePromptField.placeholderString = "Claude 에게 보낼 내용…"
+        claudeInvokePromptField.font = .systemFont(ofSize: 12)
+        claudeInvokePromptField.target = self
+        claudeInvokePromptField.action = #selector(invokeClaude)
         claudeInvokeButton.bezelStyle = .rounded
         claudeInvokeButton.controlSize = .small
         claudeInvokeButton.target = self
@@ -350,20 +373,20 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
         claudeInvokeStatusLabel.textColor = .secondaryLabelColor
         claudeInvokeStatusLabel.lineBreakMode = .byTruncatingTail
 
-        let claudeInvokeRow = NSStackView(views: [
-            terminalCheckbox, orcaCheckbox, desktopCheckbox, NSView(), claudeInvokeButton
-        ])
-        claudeInvokeRow.orientation = .horizontal
-        claudeInvokeRow.spacing = 8
+        let claudeInvokeMethodRow = NSStackView(views: [terminalRadio, orcaRadio, desktopRadio])
+        claudeInvokeMethodRow.orientation = .horizontal
+        claudeInvokeMethodRow.spacing = 8
 
-        let bottom = NSStackView(views: [
-            promptField, claudeInvokeRow, claudeInvokeStatusLabel, statusRow, answerScroll
-        ])
-        bottom.orientation = .vertical
-        bottom.alignment = .leading
-        bottom.spacing = 6
+        let claudeInvokeInputRow = NSStackView(
+            views: [claudeInvokePromptField, claudeInvokeButton]
+        )
+        claudeInvokeInputRow.orientation = .horizontal
+        claudeInvokeInputRow.spacing = 8
 
-        let root = NSStackView(views: [topRow, columns, bottom])
+        let root = NSStackView(views: [
+            topRow, claudeInvokeMethodRow, claudeInvokeInputRow, claudeInvokeStatusLabel,
+            columns, bottom
+        ])
         root.orientation = .vertical
         root.alignment = .leading
         root.spacing = 10
@@ -378,11 +401,12 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
             root.topAnchor.constraint(equalTo: container.topAnchor),
             root.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             topRow.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -28),
+            claudeInvokeMethodRow.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -28),
+            claudeInvokeInputRow.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -28),
+            claudeInvokeStatusLabel.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -28),
             columns.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -28),
             bottom.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -28),
             promptField.widthAnchor.constraint(equalTo: bottom.widthAnchor),
-            claudeInvokeRow.widthAnchor.constraint(equalTo: bottom.widthAnchor),
-            claudeInvokeStatusLabel.widthAnchor.constraint(equalTo: bottom.widthAnchor),
             statusRow.widthAnchor.constraint(equalTo: bottom.widthAnchor),
             answerScroll.widthAnchor.constraint(equalTo: bottom.widthAnchor),
             columns.heightAnchor.constraint(greaterThanOrEqualToConstant: 320)
@@ -877,37 +901,30 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
 
     // MARK: - Claude 호출
 
-    /// Written the moment a checkbox moves, like the toolbar dropdowns above --
-    /// no 저장 button, because picking methods right before pressing 호출 is not
-    /// filling out a form.
+    /// Written the moment a radio moves, like the toolbar dropdowns above -- no 저장
+    /// button, because picking a method right before pressing 호출 is not filling out a
+    /// form. Radios in the same stack view are mutually exclusive on their own, so
+    /// exactly one of the three is ever on.
     @objc private func claudeInvokeMethodToggled() {
-        ClaudeInvokeSettings.terminalEnabled = terminalCheckbox.state == .on
-        ClaudeInvokeSettings.orcaEnabled = orcaCheckbox.state == .on
-        ClaudeInvokeSettings.desktopEnabled = desktopCheckbox.state == .on
+        if terminalRadio.state == .on { ClaudeInvokeSettings.invokeMethod = .terminal }
+        else if orcaRadio.state == .on { ClaudeInvokeSettings.invokeMethod = .orca }
+        else if desktopRadio.state == .on { ClaudeInvokeSettings.invokeMethod = .desktop }
     }
 
-    /// Reapplies the checkboxes' remembered state -- the settings window can
+    /// Reapplies the radio group's remembered state -- the settings window can
     /// change the per-method options while this window is closed, and the
-    /// checkboxes themselves can be toggled here and should still read back
-    /// the same on the next `show()`.
+    /// radios themselves can be toggled here and should still read back the
+    /// same on the next `show()`.
     private func restoreClaudeInvokeRow() {
-        terminalCheckbox.state = ClaudeInvokeSettings.terminalEnabled ? .on : .off
-        orcaCheckbox.state = ClaudeInvokeSettings.orcaEnabled ? .on : .off
-        desktopCheckbox.state = ClaudeInvokeSettings.desktopEnabled ? .on : .off
+        let method = ClaudeInvokeSettings.invokeMethod
+        terminalRadio.state = method == .terminal ? .on : .off
+        orcaRadio.state = method == .orca ? .on : .off
+        desktopRadio.state = method == .desktop ? .on : .off
     }
 
     @objc private func invokeClaude() {
-        let text = promptField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = claudeInvokePromptField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-
-        var methods: [ClaudeInvokeMethod] = []
-        if terminalCheckbox.state == .on { methods.append(.terminal) }
-        if orcaCheckbox.state == .on { methods.append(.orca) }
-        if desktopCheckbox.state == .on { methods.append(.desktop) }
-        guard !methods.isEmpty else {
-            claudeInvokeStatusLabel.stringValue = "보낼 방식을 하나 이상 선택하세요."
-            return
-        }
 
         let prompt = ClaudeInvokePromptBuilder.compose(
             userText: text,
@@ -915,12 +932,38 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
             pageBody: openBody,
             attachContext: ClaudeInvokeSettings.attachWikiContext && openPage != nil
         )
+        send(prompt: prompt, label: nil)
+    }
 
+    /// The quick way to hand a row straight to Claude without opening it first -- the
+    /// "실행" button in the list's fourth column. Reuses whatever is already typed in
+    /// `claudeInvokePromptField` as the instruction, so the flow is "write it once, fire
+    /// it at as many rows as it applies to" rather than guessing a default instruction
+    /// per press.
+    private func quickInvokeClaude(for page: WikiPage) {
+        let text = claudeInvokePromptField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            claudeInvokeStatusLabel.stringValue = "먼저 프롬프트를 입력하세요."
+            return
+        }
+        // Read straight from disk, like `present(_:)` does for the row someone opens --
+        // this row need not be the one currently open.
+        let body = (try? String(contentsOfFile: page.path, encoding: .utf8)) ?? ""
+        let prompt = ClaudeInvokePromptBuilder.compose(
+            userText: text, pageTitle: page.basename, pageBody: body, attachContext: true
+        )
+        send(prompt: prompt, label: page.basename)
+    }
+
+    /// Shared by the main 호출 button and each row's quick-invoke button. `label`, when
+    /// given, prefixes the status line so a row's result is not mistaken for the main
+    /// prompt's.
+    private func send(prompt: String, label: String?) {
         claudeInvokeButton.isEnabled = false
         claudeInvokeStatusLabel.stringValue = "호출하는 중…"
         claudeInvokeDispatcher.invoke(
             prompt: prompt,
-            methods: methods,
+            methods: [ClaudeInvokeSettings.invokeMethod],
             confirm: { [weak self] message in
                 guard let self else { return false }
                 // Called from the dispatcher's background queue; NSAlert needs
@@ -931,9 +974,10 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
         ) { [weak self] results in
             guard let self else { return }
             self.claudeInvokeButton.isEnabled = true
-            self.claudeInvokeStatusLabel.stringValue = results
+            let line = results
                 .map { "\($0.success ? "✓" : "✗") \($0.message)" }
                 .joined(separator: "  ·  ")
+            self.claudeInvokeStatusLabel.stringValue = label.map { "[[\($0)]] · \(line)" } ?? line
         }
     }
 
@@ -944,6 +988,11 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
         alert.addButton(withTitle: "보내기")
         alert.addButton(withTitle: "취소")
         return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    @objc private func rowInvokeButtonClicked(_ sender: NSButtonCell) {
+        guard pages.indices.contains(sender.tag) else { return }
+        quickInvokeClaude(for: pages[sender.tag])
     }
 }
 
@@ -988,8 +1037,27 @@ extension WikiWindowController: NSTableViewDataSource, NSTableViewDelegate {
         switch tableColumn?.identifier.rawValue {
         case "status": return page.status
         case "assignee": return page.assignee
+        case "invoke": return nil
         default: return page.basename
         }
+    }
+
+    /// Gives the "실행" cell its own target/action, carrying the row in `tag` --
+    /// rather than leaning on `NSTableView.clickedRow`, which is only set by a
+    /// literal mouse-down the table view itself tracks. A press performed through
+    /// the accessibility tree (VoiceOver, or `trolley click` on this very button)
+    /// calls `NSCell.performClick`, which fires the *cell's* target/action and
+    /// never touches `clickedRow` at all -- so without this, the row's button
+    /// would work for a mouse but not for the automation this app is built on.
+    func tableView(
+        _ tableView: NSTableView, willDisplayCell cell: Any, for tableColumn: NSTableColumn?,
+        row: Int
+    ) {
+        guard tableColumn?.identifier.rawValue == "invoke", let buttonCell = cell as? NSButtonCell
+        else { return }
+        buttonCell.tag = row
+        buttonCell.target = self
+        buttonCell.action = #selector(rowInvokeButtonClicked(_:))
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
