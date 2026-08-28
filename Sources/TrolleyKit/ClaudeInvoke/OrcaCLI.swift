@@ -25,7 +25,25 @@ public enum OrcaCLI {
 
     public struct Terminal: Decodable {
         public let handle: String
+        /// `null` for an orphaned pty with no live tab -- decoded to "" rather
+        /// than `String?` so callers don't all have to unwrap it, and so one
+        /// null-titled terminal in the array can't fail the whole decode the
+        /// way a non-optional `String` did (a real bug: every `list` response
+        /// with an orphaned terminal made `parseTerminals` return nil, which
+        /// is why "orca 창 목록을 읽지 못했습니다" fired on a machine that had
+        /// live idle panes the whole time).
         public let title: String
+        /// A detached pty with no tab to send into -- never a valid target.
+        public let orphaned: Bool
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            handle = try container.decode(String.self, forKey: .handle)
+            title = try container.decodeIfPresent(String.self, forKey: .title) ?? ""
+            orphaned = try container.decodeIfPresent(Bool.self, forKey: .orphaned) ?? false
+        }
+
+        enum CodingKeys: String, CodingKey { case handle, title, orphaned }
     }
 
     struct ListEnvelope: Decodable {

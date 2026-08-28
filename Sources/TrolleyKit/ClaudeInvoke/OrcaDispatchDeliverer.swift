@@ -36,8 +36,10 @@ public struct OrcaDispatchDeliverer: ClaudeInvokeDeliverer {
             return ClaudeInvokeResult(method: .orca, success: false, message: "orca 로 열린 창이 없습니다.")
         }
 
+        // An orphaned pty has no tab left to send into.
+        let live = terminals.filter { !$0.orphaned }
         let pinned = pinnedHandle()
-        let candidates = pinned.isEmpty ? terminals : terminals.filter { $0.handle == pinned }
+        let candidates = pinned.isEmpty ? live : live.filter { $0.handle == pinned }
         guard !candidates.isEmpty else {
             return ClaudeInvokeResult(
                 method: .orca, success: false, message: "지정한 창(\(pinned))을 찾을 수 없습니다."
