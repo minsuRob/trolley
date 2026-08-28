@@ -45,12 +45,11 @@ public enum ClaudeInvokeSettings {
         set { defaults.set(newValue, forKey: attachWikiContextKey) }
     }
 
-    /// Defaults to on: unlike the terminal and Desktop methods, which only ever
-    /// act on a window trolley itself just opened, orca can deliver into a pane
-    /// someone else is looking at. Confirming first is the same discipline
-    /// copy-chat's own dry-run step exists for.
+    /// Defaults to off: 사용자가 매번 뜨는 확인창을 원치 않는다고 명시적으로 요청했다.
+    /// orca 대상은 어차피 이 사람 자신의 터미널 pane 이라 잘못 보낼 위험이 낮다고 판단한
+    /// 것이므로, 그래도 확인이 필요하면 설정 창의 "보내기 전 확인" 체크박스로 다시 켤 수 있다.
     public static var orcaConfirmBeforeSend: Bool {
-        get { defaults.object(forKey: orcaConfirmKey) as? Bool ?? true }
+        get { defaults.object(forKey: orcaConfirmKey) as? Bool ?? false }
         set { defaults.set(newValue, forKey: orcaConfirmKey) }
     }
 

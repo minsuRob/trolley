@@ -32,10 +32,10 @@ final class ClaudeInvokeSettingsTests: XCTestCase {
         }
     }
 
-    func testSafetyDefaultsAreOnAndAutoSubmitIsOff() {
+    func testContextAttachIsOnConfirmAndAutoSubmitAreOff() {
         withCleanDefaults {
             XCTAssertTrue(ClaudeInvokeSettings.attachWikiContext)
-            XCTAssertTrue(ClaudeInvokeSettings.orcaConfirmBeforeSend)
+            XCTAssertFalse(ClaudeInvokeSettings.orcaConfirmBeforeSend)
             XCTAssertFalse(ClaudeInvokeSettings.desktopAutoSubmit)
         }
     }
