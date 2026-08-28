@@ -8,9 +8,6 @@ import AppKit
 /// per path) -- `Bundle.module` would crash away from the build directory.
 class FolderIconView: NSView {
     /// The 내 일감 count, top-right -- red circle, white digits, capped at "+99".
-    /// Added before `badgeLayer` so a just-finished ✅/❌ draws over it rather
-    /// than the other way round; that overlap is rare (2.5s per tool call) and
-    /// the completion badge is the more urgent of the two.
     let countBadgeLayer = CATextLayer()
     /// The ✅/❌ overlay, hidden unless a call just finished.
     let badgeLayer = CATextLayer()
@@ -63,8 +60,13 @@ class FolderIconView: NSView {
         super.layout()
         let countBadgeSize: CGFloat = 20
         countBadgeLayer.frame = CGRect(
-            x: bounds.maxX - countBadgeSize - 2,
-            y: bounds.maxY - countBadgeSize - 2,
+            // Pulled in from the corner so the circle drapes over the folder's
+            // own top-right edge instead of floating in the empty margin above it.
+            x: bounds.maxX - countBadgeSize - 6,
+            // The view is flipped (y=0 at top), and a layer-backed flipped NSView
+            // carries that into its sublayers' frames too -- `minY`, not `maxY`,
+            // is the top edge here.
+            y: bounds.height * 0.16,
             width: countBadgeSize,
             height: countBadgeSize
         )
