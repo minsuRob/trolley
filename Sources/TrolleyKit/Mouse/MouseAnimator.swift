@@ -47,14 +47,26 @@ public struct CGMouseEventPoster: MouseEventPosting {
         // (and any future double-click support) depend on this.
         down?.setIntegerValueField(.mouseEventClickState, value: 1)
         up?.setIntegerValueField(.mouseEventClickState, value: 1)
-        deliver(down)
-        // A human holds a button down for tens of milliseconds. Releasing in
-        // the same instant loses the click in any view that opens a mouse
-        // tracking loop on mouseDown -- an AppKit text field, measurably, whose
-        // loop then waits for an up that was already delivered and wedges the
-        // app's main thread. Cheap insurance on every click.
-        Thread.sleep(forTimeInterval: 0.04)
-        deliver(up)
+        // Tagged so RealInputLock's tap lets our own re-injected events
+        // through instead of dropping them along with real hardware input.
+        if let down { RealInputLock.mark(down) }
+        if let up { RealInputLock.mark(up) }
+
+        // The down-to-up window is exactly where a real mouse move (or
+        // another automation agent's own HID events) can land between our
+        // two events and read to the OS as a drag through several points
+        // instead of a discrete click -- see RealInputLock's doc comment.
+        RealInputLock.withRealInputSuppressed {
+            deliver(down)
+            // A human holds a button down for tens of milliseconds. Releasing
+            // in the same instant loses the click in any view that opens a
+            // mouse tracking loop on mouseDown -- an AppKit text field,
+            // measurably, whose loop then waits for an up that was already
+            // delivered and wedges the app's main thread. Cheap insurance on
+            // every click.
+            Thread.sleep(forTimeInterval: 0.04)
+            deliver(up)
+        }
     }
 
     private func deliver(_ event: CGEvent?) {

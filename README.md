@@ -550,33 +550,54 @@ Chromium/Electron 웹 콘텐츠는 `thorough=true`로도 AX 트리가 열리지 
 0.15~0.6초, 60fps `.mouseMoved` 이벤트). 지켜보는 사람이 자동화가 뭘 하는지 눈으로
 따라갈 수 있고, 호버 상태를 읽는 앱에도 자연스러운 이벤트 흐름이 전달된다.
 
-### AXPress 폴백 클릭과 실제 마우스의 경합
+### 합성 클릭과 실제 마우스의 경합
 
-`click_at`/`move_mouse`와 AXPress 폴백은 겉보기엔 같은 "합성 클릭"이지만 문제가 다르다.
-전자는 사람이 보라고 일부러 화면의 진짜 커서를 움직인다. 후자는 그럴 이유가 없는
-내부 복구 경로일 뿐인데, 예전에는 똑같이 `MouseAnimator`의 애니메이션을 타서 커서가
-공유 HID 스트림 위에 150~600ms + 40ms 홀드 동안 "떠 있었다" — 그 사이 사람의 실제
-손이나 다른 자동화가 같은 커서를 건드리면 down과 up 사이에 다른 지점을 거쳐간 것으로
-OS가 읽어, 리스트/테이블에서 항목이 여러 개 선택되는 것으로 나타났다.
+모든 합성 클릭(`click_at`, `move_mouse`, AXPress 실패 시 폴백)은 `MouseAnimator`/
+`CGMouseEventPoster`를 거쳐 공유 HID 스트림 위에서 down/up을 posting한다. down과
+up 사이 40ms 홀드 동안 사람의 실제 손이나 다른 자동화가 같은 공유 커서를 건드리면
+down과 up 사이에 다른 지점을 거쳐간 것으로 OS가 읽어, 리스트/테이블에서 항목이
+여러 개 선택되는 것으로 나타난다(OpenAI Codex 데스크톱 computer-use를 함께 쓸 때
+실제로 관찰됨).
 
-키보드 쪽은 이미 답을 갖고 있었다: `CGKeyboardSynthesizer(targetPid:)`가 pid를 알면
-`event.postToPid(pid)`로 대상 프로세스에 직접 꽂아 공유 스트림을 건드리지 않는다.
-AXPress 폴백 클릭도 대상 요소의 pid를 이미 알고 있으므로(`ElementRegistry`, `appRoot`),
-`CGMouseEventPoster(targetPid:)`가 같은 길을 탄다 — 켜져 있으면 실제 커서를 전혀
-움직이지 않고 대상 프로세스로 바로 전달돼, 구조적으로 실제 마우스나 다른 에이전트와
-경합할 수 없다. `click_at`/`move_mouse`는 그대로 애니메이션을 탄다.
+**처음엔 커서를 아예 안 움직이는 길을 시도했다가 실측으로 접었다.** 키보드 쪽
+(`CGKeyboardSynthesizer(targetPid:)`)은 pid를 알면 `event.postToPid(pid)`로 대상
+프로세스에 직접 꽂아 공유 스트림을 안 탄다 — 마우스도 같은 길(`CGMouseEventPoster
+(targetPid:)`)을 냈었다. 그런데 실기기로 재보니 `postToPid` 마우스 클릭은 Chromium/
+Electron뿐 아니라 **trolley 자신의 네이티브 SwiftUI 컨트롤에서도 조용히 씹혔다** —
+AXPress와 기존 공유 HID 클릭은 매번 정확히 동작했는데 `postToPid`만 반응이 없었고,
+윈도우를 명시적으로 앞으로 올리고 키보드가 쓰는 것과 같은 이벤트 소스를 명시해도
+마찬가지였다. 공개 API로는 CGEvent가 전달 성공 여부를 알려주지 않으니 코드로
+자동 감지할 수도 없다. 이 경로(`makeMousePoster`, `pidTargetedClickEnabled`,
+`TROLLEY_PID_CLICK`)는 그래서 **기본 꺼짐으로 코드만 남아 있다** — 켜봤자 클릭이
+조용히 안 먹히는 상태라 실질적으로 죽은 경로다. 업계가 실제로 쓰는 "분리된 커서"는
+비공개 SkyLight 프레임워크 수준의 시스템 통합이 필요한 것으로 리서치됐고(OpenAI가
+이 영역 전문 회사를 인수했을 정도), 서명·공증 리스크 때문에 이번 범위에서는 가지
+않았다.
 
-**기본값은 꺼져 있다**(`TROLLEY_PID_CLICK=1`로 켠다). AXPress가 실패하는 위젯은
-Chromium/Electron 계열이 많은데, Chrome 렌더러는 `CGEvent.postToPid`를 신뢰 안 된
-합성 이벤트로 거를 수 있다는 게 알려져 있고, CGEvent는 전달 성공 여부를 알려주지
-않아 코드로 자동 감지할 수 없다. 네이티브 앱과 Chromium/Electron 앱 양쪽에서 실측
-확인한 뒤에만 기본값 전환을 검토한다(`Scripts/dev-run.sh`, `docs/검증.md`).
+**실제로 막은 방법은 커서를 안 움직이는 게 아니라, 클릭이 나가는 그 찰나만 실제
+입력을 잠그는 것이다**(`RealInputLock`, ChatGPT 데스크톱의 "locked use"와 같은
+발상, 공개 API만 사용). `CGMouseEventPoster.click(at:)`의 down~up 구간을
+`CGEventTapCreate`(`.cghidEventTap`, `.headInsertEventTap`, `.defaultTap`)로 감싸
+그 순간 들어오는 모든 실제 마우스 이벤트를 드롭한다. 우리 자신이 posting하는
+down/up도 같은 tap 위치를 다시 지나가므로, `RealInputLock.mark(_:)`로
+`kCGEventSourceUserData`에 표시를 남겨 그것만 통과시킨다. 탭은 전용 스레드의
+CFRunLoop 위에서 돌고, 클릭이 끝나면(수십 ms) 바로 disable + invalidate된다 —
+탭 생성 자체가 실패해도(신뢰 철회 등) 락 없이 그냥 클릭을 진행한다: 락이 실패했다고
+클릭 자체를 막으면 드문 경합 버그보다 더 나쁜, "클릭이 조용히 아예 안 됨"이 되기
+때문이다. 실측: 락이 걸린 동안 표시 안 된(=실제 입력을 흉내 낸) 클릭을 같은 화면에
+꽂아봤더니 무시됐고, 락이 풀리자마자 같은 클릭이 정상적으로 먹혔다 — 사용자의 실제
+마우스가 영영 막히는 일 없이 딱 그 찰나만 막힌다는 뜻이다.
 
-플래그가 꺼져 있거나 pid를 모르면 지금처럼 애니메이션 클릭으로 폴백하되, 클릭 도중
-공유 커서가 목표 지점에서 벗어났으면(다른 손/에이전트가 끼어든 증거) `click` 결과에
-`interferenceSuspected: true`를 얹는다 — 클릭이 조용히 "성공"으로 보고되는 대신,
-드래그로 읽혔을 수 있다는 신호를 남긴다. 성공 시 `mouseFallbackDelivery`가
-`"direct"`(pid로 직접)인지 `"animated"`(애니메이션 경로)인지도 함께 보고한다.
+애니메이션이 있는 `click_at`/`move_mouse`의 **글라이드 구간은 잠그지 않는다** —
+버튼이 안 눌린 상태의 움직임은 드래그-선택을 만들지 않으므로, 사람이 보라고 일부러
+움직이는 커서를 수백 ms씩 막을 이유가 없다. 잠기는 건 오직 down~up의 짧은 클릭
+구간뿐이고, `click_at`/`move_mouse`도 AXPress 폴백도 결국 같은
+`CGMouseEventPoster.click(at:)`를 타므로 이 보호를 동일하게 받는다.
+
+방어선은 이제 둘이다: **`RealInputLock`이 클릭 구간의 실제 입력을 막는 게 근본
+해결**이고, 그래도 클릭 후 커서가 목표 지점에서 벗어나 있으면(락 자체가 못 걸렸거나
+그 찰나에 뭔가 더 있었다는 증거) `click` 결과에 `interferenceSuspected: true`를
+얹어 조용히 "성공"으로 보고되지 않게 하는 게 두 번째 안전망이다.
 
 `screenshot`은 **화면 기록 권한**이 필요하다(손쉬운 사용과 별개, 같은 바이너리 경로에
 부여). 손쉬운 사용과 달리 부여 후 **trolley를 재시작해야** 적용된다.
