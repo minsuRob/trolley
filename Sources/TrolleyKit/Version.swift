@@ -4,7 +4,7 @@ import Foundation
 /// `current` out of this file to stamp the installer, so the binary and the
 /// package can never disagree about what version they are.
 public enum TrolleyVersion {
-    public static let current = "0.2.6"
+    public static let current = "0.2.7"
 
     /// The Developer ID team every update is pinned to. A download that is not
     /// signed by this team is refused, whatever the server said.
