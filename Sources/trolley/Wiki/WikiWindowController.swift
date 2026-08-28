@@ -1038,8 +1038,33 @@ extension WikiWindowController: NSTableViewDataSource, NSTableViewDelegate {
         case "status": return page.status
         case "assignee": return page.assignee
         case "invoke": return nil
-        default: return page.basename
+        default: return titleCellValue(for: page)
         }
+    }
+
+    /// `생성일`로부터 며칠 지났는지를 `D+N` 배지로 제목 앞에 붙인다. 10일은
+    /// `task-age.js`와 같은 "슬슬 오래됐다" 기준선이라, 그 이상이면 배지가 빨간색으로
+    /// 바뀐다. `생성일`이 없거나 형식이 이상하거나(미래 날짜 포함) 하면 배지 없이
+    /// 기존처럼 제목만 돌려준다 -- `WikiTimeline.daysSince`가 그런 값을 "정보 없음"으로
+    /// 읽는 것과 같은 태도.
+    private static let overdueDays = 10
+
+    private func titleCellValue(for page: WikiPage) -> Any {
+        guard let days = WikiTimeline.daysSince(page.created, today: Date()), days >= 0 else {
+            return page.basename
+        }
+        let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        let result = NSMutableAttributedString(
+            string: "D+\(days) ",
+            attributes: [
+                .foregroundColor: days >= Self.overdueDays ? NSColor.systemRed : NSColor.secondaryLabelColor,
+                .font: font
+            ]
+        )
+        result.append(NSAttributedString(
+            string: page.basename, attributes: [.foregroundColor: NSColor.labelColor, .font: font]
+        ))
+        return result
     }
 
     /// Gives the "실행" cell its own target/action, carrying the row in `tag` --
