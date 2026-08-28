@@ -197,11 +197,15 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
         // and a total wider than the clip view is exactly how 담당 came to be half off
         // the right edge.
         table.columnAutoresizingStyle = .noColumnAutoresizing
-        // The order is the reading order -- 제목 first, and the two narrow facts after
-        // it. Dragging a header sideways only ever produced a list with 상태 in front of
-        // the title, which is nobody's intent while reaching for the divider beside it.
+        // The order is the reading order -- 경과 배지가 맨 앞, 제목이 그다음, 그리고
+        // 나머지 narrow facts가 뒤를 잇는다. Dragging a header sideways only ever produced
+        // a list with 상태 in front of the title, which is nobody's intent while reaching
+        // for the divider beside it.
         table.allowsColumnReordering = false
         for (identifier, title, width, minimum, maximum) in [
+            // 생성일로부터 며칠 지났는지 보여주는 배지. 제목 셀에 같이 붙이면 글자 수가
+            // 행마다 달라 제목 시작 위치가 들쭉날쭉해지므로 별도 칸으로 뗀다.
+            ("age", "경과", CGFloat(56), CGFloat(44), CGFloat(96)),
             // 제목 is the filler: not draggable, because it is whatever the other two
             // leave behind. Dragging it could only mean taking room from itself.
             ("title", "제목", CGFloat(180), CGFloat(90), CGFloat(4_000)),
@@ -483,8 +487,10 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
     /// The same for the page. A markdown body narrower than this wraps every line twice.
     static let minimumPageWidth: CGFloat = 320
     /// Where the divider sits the first time, before anyone has dragged it: wide enough
-    /// for 제목 plus 상태 plus a handle in 담당, which the old fixed 360 was not.
-    static let defaultListWidth: CGFloat = 400
+    /// for 경과 plus 제목 plus 상태 plus a handle in 담당, which the old fixed 360 was
+    /// not. +56 over the pre-경과 400 so that column's addition does not eat into 제목's
+    /// share on a first launch nobody has widened yet.
+    static let defaultListWidth: CGFloat = 456
 
     /// Where the divider goes for a given window width.
     ///
@@ -1037,34 +1043,29 @@ extension WikiWindowController: NSTableViewDataSource, NSTableViewDelegate {
         switch tableColumn?.identifier.rawValue {
         case "status": return page.status
         case "assignee": return page.assignee
+        case "age": return ageCellValue(for: page)
         case "invoke": return nil
-        default: return titleCellValue(for: page)
+        default: return page.basename
         }
     }
 
-    /// `생성일`로부터 며칠 지났는지를 `D+N` 배지로 제목 앞에 붙인다. 10일은
-    /// `task-age.js`와 같은 "슬슬 오래됐다" 기준선이라, 그 이상이면 배지가 빨간색으로
-    /// 바뀐다. `생성일`이 없거나 형식이 이상하거나(미래 날짜 포함) 하면 배지 없이
-    /// 기존처럼 제목만 돌려준다 -- `WikiTimeline.daysSince`가 그런 값을 "정보 없음"으로
-    /// 읽는 것과 같은 태도.
+    /// `생성일`로부터 며칠 지났는지를 `경과` 칸에 `D+N`으로 보여준다. 10일은 "슬슬
+    /// 오래됐다"는 기준선이라, 그 이상이면 빨간색으로 바뀐다. `생성일`이 없거나 형식이
+    /// 이상하거나(미래 날짜 포함) 하면 빈 칸을 돌려준다 -- `WikiTimeline.daysSince`가
+    /// 그런 값을 "정보 없음"으로 읽는 것과 같은 태도.
     private static let overdueDays = 10
 
-    private func titleCellValue(for page: WikiPage) -> Any {
+    private func ageCellValue(for page: WikiPage) -> Any? {
         guard let days = WikiTimeline.daysSince(page.created, today: Date()), days >= 0 else {
-            return page.basename
+            return nil
         }
-        let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
-        let result = NSMutableAttributedString(
-            string: "D+\(days) ",
+        return NSAttributedString(
+            string: "D+\(days)",
             attributes: [
                 .foregroundColor: days >= Self.overdueDays ? NSColor.systemRed : NSColor.secondaryLabelColor,
-                .font: font
+                .font: NSFont.systemFont(ofSize: NSFont.systemFontSize)
             ]
         )
-        result.append(NSAttributedString(
-            string: page.basename, attributes: [.foregroundColor: NSColor.labelColor, .font: font]
-        ))
-        return result
     }
 
     /// Gives the "실행" cell its own target/action, carrying the row in `tag` --
