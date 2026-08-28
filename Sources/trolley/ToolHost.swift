@@ -19,6 +19,11 @@ enum ToolHost {
             launcher: launcher,
             makeKeyPoster: { targetPid in CGKeyboardSynthesizer(targetPid: targetPid) },
             mousePoster: CGMouseEventPoster(),
+            makeMousePoster: { targetPid in CGMouseEventPoster(targetPid: targetPid) },
+            // Off by default (docs/검증.md): flip once pid-targeted clicks are
+            // confirmed against a real Chromium/Electron control, not just a
+            // native one. TROLLEY_PID_CLICK=1 overrides at runtime meanwhile.
+            pidTargetedClickEnabled: ProcessInfo.processInfo.environment["TROLLEY_PID_CLICK"] == "1",
             screenCapturer: SystemScreenCapturer(),
             makeRoot: { pid, policy in
                 SystemAXElement.application(pid: pid, childrenRetryPolicy: policy)

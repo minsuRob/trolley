@@ -15,7 +15,16 @@ public protocol MouseEventPosting {
 /// top-left origin -- the same space AX frames report, which is why element
 /// centers pass straight through with no conversion.
 public struct CGMouseEventPoster: MouseEventPosting {
-    public init() {}
+    /// When set, events are delivered straight to this process via
+    /// CGEvent.postToPid instead of through the shared HID stream -- the mouse
+    /// counterpart of CGKeyboardSynthesizer.targetPid. The real cursor never
+    /// moves, so this can't race a real mouse move or another automation
+    /// agent's HID stream the way the shared-stream path can.
+    private let targetPid: pid_t?
+
+    public init(targetPid: pid_t? = nil) {
+        self.targetPid = targetPid
+    }
 
     public func currentLocation() -> CGPoint {
         // A source-less CGEvent snapshots the current HID state, cursor included.
@@ -23,12 +32,12 @@ public struct CGMouseEventPoster: MouseEventPosting {
     }
 
     public func move(to point: CGPoint) {
-        CGEvent(
+        deliver(CGEvent(
             mouseEventSource: nil,
             mouseType: .mouseMoved,
             mouseCursorPosition: point,
             mouseButton: .left
-        )?.post(tap: .cghidEventTap)
+        ))
     }
 
     public func click(at point: CGPoint) {
@@ -38,14 +47,23 @@ public struct CGMouseEventPoster: MouseEventPosting {
         // (and any future double-click support) depend on this.
         down?.setIntegerValueField(.mouseEventClickState, value: 1)
         up?.setIntegerValueField(.mouseEventClickState, value: 1)
-        down?.post(tap: .cghidEventTap)
+        deliver(down)
         // A human holds a button down for tens of milliseconds. Releasing in
         // the same instant loses the click in any view that opens a mouse
         // tracking loop on mouseDown -- an AppKit text field, measurably, whose
         // loop then waits for an up that was already delivered and wedges the
         // app's main thread. Cheap insurance on every click.
         Thread.sleep(forTimeInterval: 0.04)
-        up?.post(tap: .cghidEventTap)
+        deliver(up)
+    }
+
+    private func deliver(_ event: CGEvent?) {
+        guard let event else { return }
+        if let targetPid {
+            event.postToPid(targetPid)
+        } else {
+            event.post(tap: .cghidEventTap)
+        }
     }
 }
 
@@ -53,6 +71,18 @@ public struct MouseMoveReport {
     public let from: CGPoint
     public let to: CGPoint
     public let duration: TimeInterval
+    /// Best-effort evidence that something else moved the shared HID cursor
+    /// during this click's down-to-up window -- a real mouse move or another
+    /// automation agent's own HID stream. Always false for a plain move (there
+    /// is no click to interleave with).
+    public let driftedDuringClick: Bool
+
+    public init(from: CGPoint, to: CGPoint, duration: TimeInterval, driftedDuringClick: Bool = false) {
+        self.from = from
+        self.to = to
+        self.duration = duration
+        self.driftedDuringClick = driftedDuringClick
+    }
 }
 
 /// Moves the cursor like a hand would -- an eased glide from where it is to the
@@ -121,9 +151,11 @@ public struct MouseAnimator {
     }
 
     @discardableResult
-    public func animatedClick(to target: CGPoint) -> MouseMoveReport {
+    public func animatedClick(to target: CGPoint, driftTolerance: CGFloat = 2) -> MouseMoveReport {
         let report = animatedMove(to: target)
         poster.click(at: target)
-        return report
+        let after = poster.currentLocation()
+        let drifted = hypot(after.x - target.x, after.y - target.y) > driftTolerance
+        return MouseMoveReport(from: report.from, to: report.to, duration: report.duration, driftedDuringClick: drifted)
     }
 }

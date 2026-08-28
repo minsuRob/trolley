@@ -16,6 +16,8 @@ final class TrolleyToolsTests: XCTestCase {
     private var keyPosterTargets: [pid_t?] = []
     private var clipboard = FakeClipboard()
     private var inputSource = FakeInputSource()
+    private var pidMouseFactory = FakePidMousePosterFactory()
+    private var pidTargetedClickEnabled = false
 
     private func makeTools() -> TrolleyTools {
         TrolleyTools(
@@ -26,6 +28,10 @@ final class TrolleyToolsTests: XCTestCase {
                 return self?.poster ?? FakeKeyPoster()
             },
             mousePoster: mouse,
+            makeMousePoster: { [weak self] targetPid in
+                self?.pidMouseFactory.make(targetPid: targetPid) ?? FakeMousePoster()
+            },
+            pidTargetedClickEnabled: pidTargetedClickEnabled,
             screenCapturer: screen,
             makeRoot: { [weak self] _, _ in self?.root ?? FakeElement() },
             activateApp: { [weak self] pid in
@@ -57,6 +63,8 @@ final class TrolleyToolsTests: XCTestCase {
         keyPosterTargets = []
         clipboard = FakeClipboard()
         inputSource = FakeInputSource()
+        pidMouseFactory = FakePidMousePosterFactory()
+        pidTargetedClickEnabled = false
     }
 
     private func call(_ name: String, _ arguments: [String: JSONValue] = [:]) throws -> JSONValue {
@@ -712,8 +720,9 @@ final class TrolleyToolsTests: XCTestCase {
         }
     }
 
-    /// The AXPress-fallback click goes through the same animator, so it glides
-    /// exactly like an explicit click_at.
+    /// With pid-targeted delivery disabled (the default) or the pid unknown,
+    /// the AXPress-fallback click goes through the same animator as an
+    /// explicit click_at, so it glides the same way.
     func testAXPressFallbackClickAlsoAnimates() throws {
         let button = FakeElement(role: "AXButton", title: "OK")
         button.pressResult = false
@@ -726,9 +735,79 @@ final class TrolleyToolsTests: XCTestCase {
         let result = try tools.call(name: "click", arguments: .object(["elementId": .string(id)]))
 
         XCTAssertEqual(result["method"]?.stringValue, "mouseFallback")
+        XCTAssertEqual(result["mouseFallbackDelivery"]?.stringValue, "animated")
         XCTAssertEqual(mouse.clicks, [CGPoint(x: 450, y: 320)], "clicks the element's centre")
         XCTAssertGreaterThan(mouse.moves.count, 2, "the fallback click must glide too")
         XCTAssertEqual(mouse.moves.last, CGPoint(x: 450, y: 320))
+        XCTAssertTrue(pidMouseFactory.requestedPids.isEmpty, "the pid-targeted poster must not be touched")
+    }
+
+    /// find_elements registers ids against the app root's pid (42 here, see
+    /// setUp), so this is the common case: the fallback click's target pid is
+    /// known and delivery goes straight to the process, never touching the
+    /// shared/animated poster the way a real mouse move or another
+    /// automation agent could race.
+    func testClickDeliversDirectlyToThePidWhenKnownAndEnabled() throws {
+        let button = FakeElement(role: "AXButton", title: "OK")
+        button.pressResult = false
+        button.attributes[AXAttr.position] = axPoint(CGPoint(x: 400, y: 300))
+        button.attributes[AXAttr.size] = axSize(CGSize(width: 100, height: 40))
+        root.fakeChildren = [button]
+        pidTargetedClickEnabled = true
+        let tools = makeTools()
+        let id = try idOfFirstMatch(tools, text: "OK")
+
+        let result = try tools.call(name: "click", arguments: .object(["elementId": .string(id)]))
+
+        XCTAssertEqual(result["method"]?.stringValue, "mouseFallback")
+        XCTAssertEqual(result["mouseFallbackDelivery"]?.stringValue, "direct")
+        XCTAssertNil(result["interferenceSuspected"])
+        XCTAssertEqual(pidMouseFactory.requestedPids, [42])
+        XCTAssertEqual(pidMouseFactory.poster.clicks, [CGPoint(x: 450, y: 320)])
+        XCTAssertTrue(mouse.moves.isEmpty, "a direct delivery must never touch the shared HID cursor")
+        XCTAssertTrue(mouse.clicks.isEmpty)
+    }
+
+    /// A `snapshot`-sourced id registers with no pid override (see
+    /// TreeSnapshotter), and this FakeElement was never given one either --
+    /// the flag being enabled must not matter when there is nothing to target.
+    func testClickFallsBackToAnimatedWhenPidIsUnknownEvenWithTheFlagEnabled() throws {
+        let button = FakeElement(role: "AXButton", title: "OK")
+        button.pressResult = false
+        button.attributes[AXAttr.position] = axPoint(CGPoint(x: 400, y: 300))
+        button.attributes[AXAttr.size] = axSize(CGSize(width: 100, height: 40))
+        root.fakeChildren = [button]
+        pidTargetedClickEnabled = true
+        let tools = makeTools()
+        let snapshot = try tools.call(name: "snapshot", arguments: .object(["bundleId": .string("com.apple.TextEdit")]))
+        let id = try XCTUnwrap(snapshot["tree"]?.arrayValue?.first?["children"]?.arrayValue?.first?["id"]?.stringValue)
+
+        let result = try tools.call(name: "click", arguments: .object(["elementId": .string(id)]))
+
+        XCTAssertEqual(result["mouseFallbackDelivery"]?.stringValue, "animated")
+        XCTAssertGreaterThan(mouse.moves.count, 2)
+        XCTAssertTrue(pidMouseFactory.requestedPids.isEmpty)
+    }
+
+    /// When the fallback still goes through the shared/animated poster (flag
+    /// off, the default), a cursor drift between down and up is evidence a
+    /// real mouse move or another automation agent interleaved with the
+    /// click -- reported instead of trusted silently.
+    func testClickReportsInterferenceWhenTheSharedCursorDriftsDuringTheFallbackClick() throws {
+        let button = FakeElement(role: "AXButton", title: "OK")
+        button.pressResult = false
+        button.attributes[AXAttr.position] = axPoint(CGPoint(x: 400, y: 300))
+        button.attributes[AXAttr.size] = axSize(CGSize(width: 100, height: 40))
+        root.fakeChildren = [button]
+        mouse.locationAfterClick = CGPoint(x: 900, y: 300)
+        let tools = makeTools()
+        let id = try idOfFirstMatch(tools, text: "OK")
+
+        let result = try tools.call(name: "click", arguments: .object(["elementId": .string(id)]))
+
+        XCTAssertEqual(result["mouseFallbackDelivery"]?.stringValue, "animated")
+        XCTAssertEqual(result["interferenceSuspected"]?.boolValue, true)
+        XCTAssertNotNil(result["note"])
     }
 
     private func axPoint(_ point: CGPoint) -> AnyObject {

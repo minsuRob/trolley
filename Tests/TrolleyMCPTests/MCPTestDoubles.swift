@@ -99,6 +99,9 @@ final class FakeMousePoster: MouseEventPosting {
     var location = CGPoint(x: 0, y: 0)
     var moves: [CGPoint] = []
     var clicks: [CGPoint] = []
+    /// Simulates a real mouse move or another automation agent's own HID
+    /// event landing between this click's down and up.
+    var locationAfterClick: CGPoint?
 
     func currentLocation() -> CGPoint { location }
 
@@ -109,6 +112,22 @@ final class FakeMousePoster: MouseEventPosting {
 
     func click(at point: CGPoint) {
         clicks.append(point)
+        location = locationAfterClick ?? point
+    }
+}
+
+/// Stands in for `makeMousePoster` in `TrolleyTools` -- a deliberately
+/// separate `FakeMousePoster` from the one behind the animator, so a test can
+/// assert a pid-targeted click never touched the shared/animated poster
+/// (`moves.isEmpty`), the way the real `CGMouseEventPoster(targetPid:)` never
+/// touches the shared HID stream.
+final class FakePidMousePosterFactory {
+    let poster = FakeMousePoster()
+    var requestedPids: [pid_t?] = []
+
+    func make(targetPid: pid_t?) -> MouseEventPosting {
+        requestedPids.append(targetPid)
+        return poster
     }
 }
 

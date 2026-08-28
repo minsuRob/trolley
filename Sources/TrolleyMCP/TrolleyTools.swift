@@ -30,6 +30,17 @@ public final class TrolleyTools: ToolProviding {
     /// animator directly, and the AXPress-fallback closure is derived from it,
     /// so the fallback click glides exactly like an explicit click_at.
     private let mousePoster: MouseEventPosting?
+    /// Built per call with the target element's owning pid, mirroring
+    /// `makeKeyPoster` -- lets the AXPress-fallback click go straight to the
+    /// process via CGEvent.postToPid instead of the shared HID stream, so it
+    /// can't race a real mouse move or another automation agent's own clicks.
+    private let makeMousePoster: (pid_t?) -> MouseEventPosting
+    /// Off by default until pid-targeted delivery is verified against
+    /// Chromium/Electron controls on a real machine (see docs/검증.md) --
+    /// Chrome's renderer IPC is known to filter CGEvent.postToPid as an
+    /// untrusted synthetic event, and CGEvent gives no delivery receipt to
+    /// detect that automatically. `TROLLEY_PID_CLICK=1` overrides at runtime.
+    private let pidTargetedClickEnabled: Bool
     private let screenCapturer: ScreenCapturing?
     private let makeRoot: (pid_t, AXChildrenRetryPolicy) -> AXElementProviding
     private let listRunningApps: () -> [AppSummary]
@@ -55,11 +66,36 @@ public final class TrolleyTools: ToolProviding {
         mousePoster.map { MouseAnimator(poster: $0, sleeper: sleeper) }
     }
 
+    /// Reference type so the fallback closure -- invoked deep inside
+    /// `ActionExecutor.perform` -- can report back which delivery ran and
+    /// whether the shared cursor looked contended, without changing
+    /// `ActionExecutor`'s `(CGPoint) -> Void` closure shape.
+    private final class MouseFallbackOutcome {
+        var used = false
+        var delivery: String?
+        var interferenceSuspected = false
+    }
+
     /// The AXPress-fallback click, in the `(CGPoint) -> Void` shape
-    /// `ActionExecutor` expects -- animated, so a fallback click glides the
-    /// same way an explicit click_at does.
-    private var mouseClicker: ((CGPoint) -> Void)? {
-        animator.map { animator in { animator.animatedClick(to: $0) } }
+    /// `ActionExecutor` expects. Pid-targeted delivery is used when the
+    /// target's owning pid is known and enabled -- it never touches the
+    /// shared HID cursor, so it structurally can't race a real mouse move or
+    /// another agent's clicks the way the animated glide+click can. Falls
+    /// back to the existing animated click otherwise (no pid, no mouse
+    /// poster, or the flag is off).
+    private func mouseClicker(targetPid: pid_t?, outcome: MouseFallbackOutcome) -> ((CGPoint) -> Void)? {
+        guard let animator else { return nil }
+        return { [self] point in
+            outcome.used = true
+            if pidTargetedClickEnabled, let targetPid {
+                outcome.delivery = "direct"
+                makeMousePoster(targetPid).click(at: point)
+            } else {
+                outcome.delivery = "animated"
+                let report = animator.animatedClick(to: point)
+                outcome.interferenceSuspected = report.driftedDuringClick
+            }
+        }
     }
     /// AXManualAccessibility is a one-shot, asynchronous signal; re-sending it
     /// (and re-paying the settle delay) on every call would make each snapshot
@@ -72,6 +108,8 @@ public final class TrolleyTools: ToolProviding {
         launcher: AppLauncher = AppLauncher(),
         makeKeyPoster: @escaping (pid_t?) -> KeyEventPosting,
         mousePoster: MouseEventPosting? = nil,
+        makeMousePoster: @escaping (pid_t?) -> MouseEventPosting = { CGMouseEventPoster(targetPid: $0) },
+        pidTargetedClickEnabled: Bool = ProcessInfo.processInfo.environment["TROLLEY_PID_CLICK"] == "1",
         screenCapturer: ScreenCapturing? = nil,
         makeRoot: @escaping (pid_t, AXChildrenRetryPolicy) -> AXElementProviding,
         activateApp: @escaping (pid_t) -> Bool,
@@ -88,6 +126,8 @@ public final class TrolleyTools: ToolProviding {
         self.launcher = launcher
         self.makeKeyPoster = makeKeyPoster
         self.mousePoster = mousePoster
+        self.makeMousePoster = makeMousePoster
+        self.pidTargetedClickEnabled = pidTargetedClickEnabled
         self.screenCapturer = screenCapturer
         self.makeRoot = makeRoot
         self.listRunningApps = listRunningApps
@@ -592,26 +632,33 @@ public final class TrolleyTools: ToolProviding {
         try requireTrust()
         let target = try resolveTarget(args)
 
-        var usedMouseFallback = false
-        let recordingClicker: ((CGPoint) -> Void)? = mouseClicker.map { real in
-            { point in
-                usedMouseFallback = true
-                real(point)
-            }
-        }
+        let outcome = MouseFallbackOutcome()
         let executor = ActionExecutor(
             root: target.element,
             keyPoster: makeKeyPoster(nil),
-            mouseClicker: recordingClicker
+            mouseClicker: mouseClicker(targetPid: target.pid, outcome: outcome)
         )
 
         switch executor.perform(.click(target.element)) {
         case .ok:
-            return .object([
+            var payload: [String: JSONValue] = [
                 "clicked": .bool(true),
-                "method": .string(usedMouseFallback ? "mouseFallback" : "AXPress"),
+                "method": .string(outcome.used ? "mouseFallback" : "AXPress"),
                 "role": .string(target.element.stringAttribute(AXAttr.role) ?? "?")
-            ])
+            ]
+            if let delivery = outcome.delivery {
+                payload["mouseFallbackDelivery"] = .string(delivery)
+            }
+            if outcome.interferenceSuspected {
+                payload["interferenceSuspected"] = .bool(true)
+                payload["note"] = .string(
+                    "The fallback click's cursor position drifted from the click target between "
+                    + "down and up -- a real mouse move or another automation agent may have "
+                    + "interleaved with this click. Treat it as unverified; re-check with a "
+                    + "snapshot before assuming it landed where intended."
+                )
+            }
+            return .object(payload)
         case .failed(let reason):
             throw ToolError(
                 .actionFailed,
@@ -630,7 +677,7 @@ public final class TrolleyTools: ToolProviding {
         let executor = ActionExecutor(
             root: target.element,
             keyPoster: makeKeyPoster(nil),
-            mouseClicker: mouseClicker
+            mouseClicker: mouseClicker(targetPid: target.pid, outcome: MouseFallbackOutcome())
         )
 
         let result = executor.perform(.focus(target.element))
@@ -672,7 +719,11 @@ public final class TrolleyTools: ToolProviding {
             }
             sleeper(0.4)
 
-            let executor = ActionExecutor(root: target, keyPoster: makeKeyPoster(nil), mouseClicker: mouseClicker)
+            let executor = ActionExecutor(
+                root: target,
+                keyPoster: makeKeyPoster(nil),
+                mouseClicker: mouseClicker(targetPid: pid, outcome: MouseFallbackOutcome())
+            )
             if case .failed(let reason) = executor.perform(.focus(target)) {
                 throw ToolError(.actionFailed, "could not focus \(elementID): \(reason)")
             }
@@ -969,11 +1020,13 @@ public final class TrolleyTools: ToolProviding {
 
     private struct Target {
         let element: AXElementProviding
+        let pid: pid_t?
     }
 
     private func resolveTarget(_ args: Arguments) throws -> Target {
         if let elementID = args.optionalString("elementId") {
-            return Target(element: try registry.resolve(elementID))
+            let element = try registry.resolve(elementID)
+            return Target(element: element, pid: registry.pid(for: elementID) ?? element.pid)
         }
         guard let bundleID = args.optionalString("bundleId") else {
             throw ToolError(
@@ -983,7 +1036,7 @@ public final class TrolleyTools: ToolProviding {
             )
         }
         let (text, role) = try textAndRole(args)
-        let (root, _) = try appRoot(bundleID: bundleID, thorough: false)
+        let (root, pid) = try appRoot(bundleID: bundleID, thorough: false)
         let ranked = rankedMatches(
             root: root,
             text: text,
@@ -993,7 +1046,7 @@ public final class TrolleyTools: ToolProviding {
         guard let match = ranked.first else {
             throw ToolError.elementNotFound(text: text ?? role ?? "", bundleID: bundleID)
         }
-        return Target(element: match.element)
+        return Target(element: match.element, pid: pid)
     }
 
     private func describeMatch(_ element: AXElementProviding) -> [String: JSONValue] {

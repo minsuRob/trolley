@@ -282,7 +282,7 @@ xcrun stapler staple dist/trolley-<버전>.dmg
 | `list_apps` / `launch_app` | 실행 중인 앱 목록 / 실행·활성화 |
 | `snapshot` | AX 트리를 LLM이 읽기 좋은 JSON으로. 노드마다 ID 부여 |
 | `find_elements` | 텍스트·역할로 요소 검색(구체적인 것 우선). 역할만으로도 검색 가능 |
-| `click` / `focus` | AXPress(실패 시 마우스 폴백) / 포커스 |
+| `click` / `focus` | AXPress(실패 시 마우스 폴백, `mouseFallbackDelivery`·`interferenceSuspected` 참고 아래) / 포커스 |
 | `type_text` | 텍스트 입력(한글·이모지 포함). 기본은 붙여넣기, `method=keys`는 실제 키 입력 |
 | `press_key` | 단축키. 문자·숫자·F키 포함 (`cmd+n` 등) |
 | `set_ax_value` | AXValue 직접 쓰기 + readback 확인 |
@@ -546,10 +546,37 @@ Chromium/Electron 웹 콘텐츠는 `thorough=true`로도 AX 트리가 열리지 
 `maxWidth`로 더 줄이면 비율이 올라가므로 응답의 `pointsPerPixel`과 `capturedRegion`으로
 환산한다 — 공식은 툴 description에 있다.
 
-모든 마우스 동작(`click_at`, `move_mouse`, AXPress 실패 시 폴백 클릭)은 순간이동이
-아니라 **이지징 곡선으로 미끄러진다**(거리에 따라 0.15~0.6초, 60fps `.mouseMoved`
-이벤트). 지켜보는 사람이 자동화가 뭘 하는지 눈으로 따라갈 수 있고, 호버 상태를 읽는
-앱에도 자연스러운 이벤트 흐름이 전달된다.
+`click_at`/`move_mouse`는 순간이동이 아니라 **이지징 곡선으로 미끄러진다**(거리에 따라
+0.15~0.6초, 60fps `.mouseMoved` 이벤트). 지켜보는 사람이 자동화가 뭘 하는지 눈으로
+따라갈 수 있고, 호버 상태를 읽는 앱에도 자연스러운 이벤트 흐름이 전달된다.
+
+### AXPress 폴백 클릭과 실제 마우스의 경합
+
+`click_at`/`move_mouse`와 AXPress 폴백은 겉보기엔 같은 "합성 클릭"이지만 문제가 다르다.
+전자는 사람이 보라고 일부러 화면의 진짜 커서를 움직인다. 후자는 그럴 이유가 없는
+내부 복구 경로일 뿐인데, 예전에는 똑같이 `MouseAnimator`의 애니메이션을 타서 커서가
+공유 HID 스트림 위에 150~600ms + 40ms 홀드 동안 "떠 있었다" — 그 사이 사람의 실제
+손이나 다른 자동화가 같은 커서를 건드리면 down과 up 사이에 다른 지점을 거쳐간 것으로
+OS가 읽어, 리스트/테이블에서 항목이 여러 개 선택되는 것으로 나타났다.
+
+키보드 쪽은 이미 답을 갖고 있었다: `CGKeyboardSynthesizer(targetPid:)`가 pid를 알면
+`event.postToPid(pid)`로 대상 프로세스에 직접 꽂아 공유 스트림을 건드리지 않는다.
+AXPress 폴백 클릭도 대상 요소의 pid를 이미 알고 있으므로(`ElementRegistry`, `appRoot`),
+`CGMouseEventPoster(targetPid:)`가 같은 길을 탄다 — 켜져 있으면 실제 커서를 전혀
+움직이지 않고 대상 프로세스로 바로 전달돼, 구조적으로 실제 마우스나 다른 에이전트와
+경합할 수 없다. `click_at`/`move_mouse`는 그대로 애니메이션을 탄다.
+
+**기본값은 꺼져 있다**(`TROLLEY_PID_CLICK=1`로 켠다). AXPress가 실패하는 위젯은
+Chromium/Electron 계열이 많은데, Chrome 렌더러는 `CGEvent.postToPid`를 신뢰 안 된
+합성 이벤트로 거를 수 있다는 게 알려져 있고, CGEvent는 전달 성공 여부를 알려주지
+않아 코드로 자동 감지할 수 없다. 네이티브 앱과 Chromium/Electron 앱 양쪽에서 실측
+확인한 뒤에만 기본값 전환을 검토한다(`Scripts/dev-run.sh`, `docs/검증.md`).
+
+플래그가 꺼져 있거나 pid를 모르면 지금처럼 애니메이션 클릭으로 폴백하되, 클릭 도중
+공유 커서가 목표 지점에서 벗어났으면(다른 손/에이전트가 끼어든 증거) `click` 결과에
+`interferenceSuspected: true`를 얹는다 — 클릭이 조용히 "성공"으로 보고되는 대신,
+드래그로 읽혔을 수 있다는 신호를 남긴다. 성공 시 `mouseFallbackDelivery`가
+`"direct"`(pid로 직접)인지 `"animated"`(애니메이션 경로)인지도 함께 보고한다.
 
 `screenshot`은 **화면 기록 권한**이 필요하다(손쉬운 사용과 별개, 같은 바이너리 경로에
 부여). 손쉬운 사용과 달리 부여 후 **trolley를 재시작해야** 적용된다.

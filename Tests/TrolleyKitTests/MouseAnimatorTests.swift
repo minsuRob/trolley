@@ -6,6 +6,10 @@ final class RecordingMousePoster: MouseEventPosting {
     var location = CGPoint(x: 0, y: 0)
     var moves: [CGPoint] = []
     var clicks: [CGPoint] = []
+    /// Simulates a real mouse move or another automation agent's own HID
+    /// event landing between this click's down and up: when set, `location`
+    /// snaps here right after the click instead of staying at the clicked point.
+    var locationAfterClick: CGPoint?
 
     func currentLocation() -> CGPoint { location }
 
@@ -16,6 +20,7 @@ final class RecordingMousePoster: MouseEventPosting {
 
     func click(at point: CGPoint) {
         clicks.append(point)
+        location = locationAfterClick ?? point
     }
 }
 
@@ -115,5 +120,28 @@ final class MouseAnimatorTests: XCTestCase {
         XCTAssertTrue(slept().isEmpty, "a no-op move must not stall the serial MCP loop")
         XCTAssertEqual(report.duration, 0)
         XCTAssertEqual(poster.clicks, [CGPoint(x: 50, y: 50)])
+    }
+
+    // MARK: - Interference detection
+
+    func testAnimatedClickDoesNotFlagDriftWhenTheCursorStaysPut() {
+        let poster = RecordingMousePoster()
+        let (animator, _) = makeAnimator(poster)
+
+        let report = animator.animatedClick(to: CGPoint(x: 500, y: 300))
+
+        XCTAssertFalse(report.driftedDuringClick)
+    }
+
+    func testAnimatedClickFlagsDriftWhenTheCursorMovedDuringTheHold() {
+        let poster = RecordingMousePoster()
+        // Simulates a real mouse move or another agent's own HID event
+        // landing between this click's down and up.
+        poster.locationAfterClick = CGPoint(x: 640, y: 300)
+        let (animator, _) = makeAnimator(poster)
+
+        let report = animator.animatedClick(to: CGPoint(x: 500, y: 300))
+
+        XCTAssertTrue(report.driftedDuringClick)
     }
 }
