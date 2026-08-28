@@ -198,6 +198,11 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
     private let wikiListToggle = PanelButton()
     private let wikiListStack = NSStackView()
     private var isWikiListOpen = false
+    /// Flips `isWikiListOpen` to true the first time `showWiki` reports a nonzero count,
+    /// so a real backlog is visible without a click. Once-only: a manual collapse after
+    /// that is left alone rather than fought on the next refresh, which runs off every
+    /// tool call.
+    private var hasAutoOpenedWikiList = false
     /// What the open rows are built from, so a tapped row can be turned back into the
     /// `WikiPage` `onOpenWikiPage` wants -- a button only carries the tag it was given.
     private var wikiPages: [WikiPage] = []
@@ -367,6 +372,10 @@ final class ActivityPanelController: NSObject, NSTextFieldDelegate {
             of: wikiListStack,
             with: wikiPages.enumerated().map { wikiRow($0.offset, $0.element) }
         )
+        if !hasAutoOpenedWikiList, let myCount, myCount > 0 {
+            isWikiListOpen = true
+            hasAutoOpenedWikiList = true
+        }
         applyWikiListVisibility()
         // The toggle's own visibility can change here (a first count arriving, or the
         // last page closing out from under an open preview), which changes the stack's
