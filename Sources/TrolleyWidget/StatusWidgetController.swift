@@ -520,6 +520,7 @@ public final class StatusWidgetController {
                 guard let self else { return }
                 self.wikiCheckInFlight = false
                 self.activityPanel.showWiki(available: available, myCount: count, myPages: pages)
+                self.iconView.setCount(count)
             }
         }
     }

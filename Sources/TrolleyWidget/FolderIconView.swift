@@ -7,6 +7,11 @@ import AppKit
 /// deployed by copying the bare executable to a stable path (TCC is granted
 /// per path) -- `Bundle.module` would crash away from the build directory.
 class FolderIconView: NSView {
+    /// The 내 일감 count, top-right -- red circle, white digits, capped at "+99".
+    /// Added before `badgeLayer` so a just-finished ✅/❌ draws over it rather
+    /// than the other way round; that overlap is rare (2.5s per tool call) and
+    /// the completion badge is the more urgent of the two.
+    let countBadgeLayer = CATextLayer()
     /// The ✅/❌ overlay, hidden unless a call just finished.
     let badgeLayer = CATextLayer()
     /// A rotating dashed ring shown while a tool call runs.
@@ -19,6 +24,14 @@ class FolderIconView: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
+
+        countBadgeLayer.backgroundColor = NSColor.systemRed.cgColor
+        countBadgeLayer.foregroundColor = NSColor.white.cgColor
+        countBadgeLayer.font = NSFont.boldSystemFont(ofSize: 11)
+        countBadgeLayer.fontSize = 11
+        countBadgeLayer.alignmentMode = .center
+        countBadgeLayer.opacity = 0
+        layer?.addSublayer(countBadgeLayer)
 
         badgeLayer.string = "✅"
         badgeLayer.fontSize = 26
@@ -43,10 +56,19 @@ class FolderIconView: NSView {
         super.viewDidMoveToWindow()
         let scale = window?.backingScaleFactor ?? 2
         badgeLayer.contentsScale = scale
+        countBadgeLayer.contentsScale = scale
     }
 
     override func layout() {
         super.layout()
+        let countBadgeSize: CGFloat = 20
+        countBadgeLayer.frame = CGRect(
+            x: bounds.maxX - countBadgeSize - 2,
+            y: bounds.maxY - countBadgeSize - 2,
+            width: countBadgeSize,
+            height: countBadgeSize
+        )
+        countBadgeLayer.cornerRadius = countBadgeSize / 2
         let badgeSize: CGFloat = 30
         badgeLayer.frame = CGRect(
             x: bounds.maxX - badgeSize - 2,
@@ -66,6 +88,16 @@ class FolderIconView: NSView {
             ellipseIn: CGRect(origin: .zero, size: ringFrame.size),
             transform: nil
         )
+    }
+
+    /// Shows or hides the 내 일감 count badge; see `CountBadgeCopy` for the rule.
+    func setCount(_ count: Int?) {
+        guard let text = CountBadgeCopy.text(for: count) else {
+            countBadgeLayer.opacity = 0
+            return
+        }
+        countBadgeLayer.string = text
+        countBadgeLayer.opacity = 1
     }
 
     // MARK: - Folder drawing (SVG port)
