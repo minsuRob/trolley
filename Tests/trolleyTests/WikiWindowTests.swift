@@ -87,6 +87,33 @@ final class WikiWindowTests: XCTestCase {
         XCTAssertEqual(filter.statuses, ["완료"])
     }
 
+    // MARK: - Which folders a walk needs
+
+    /// The bug this change exists for: 폴더 전체 with the default 담당=나 filter used to
+    /// walk `members`/`logs` too, spending part of `WikiIndex`'s one fixed 0.15s deadline
+    /// on folders the filter was always going to throw away.
+    func testAnUnnarrowedFilterOnlyWalksTheIndexedFolders() {
+        var filter = WikiFilter()
+        filter.folders = []
+        XCTAssertEqual(WikiWindowController.walkTargets(for: filter), WikiIndex.indexableFolders)
+    }
+
+    func testANarrowedFilterWalksOnlyWhatItKeeps() {
+        var filter = WikiFilter()
+        filter.folders = ["logs"]
+        XCTAssertEqual(WikiWindowController.walkTargets(for: filter), ["logs"])
+    }
+
+    /// Picking `members`/`logs` from the folder popup still has to walk them -- narrowing
+    /// must not accidentally drop the optional folders when they are actually wanted.
+    func testAnOptionalFolderIsStillWalkedWhenTheFilterAsksForIt() {
+        var filter = WikiFilter()
+        filter.folders = ["context/tasks", "members"]
+        XCTAssertEqual(
+            Set(WikiWindowController.walkTargets(for: filter)), ["context/tasks", "members"]
+        )
+    }
+
     // MARK: - Where the divider lands
 
     /// The number this change exists to delete: the list used to be 360 points wide,

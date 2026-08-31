@@ -440,6 +440,25 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
         )
     }
 
+    /// Which folders a walk needs to answer `filter`, not all four always.
+    ///
+    /// Same rule as `WikiCommand.walkTargets` and `WikiSettingsWindowController.walkTargets`
+    /// -- a third copy rather than a shared one, matching how the other two already sit
+    /// next to the filter they serve. `WikiIndex`'s walk deadline is one fixed 0.15s budget
+    /// shared across however many folders it is asked to enter; asking for `members`/`logs`
+    /// on every reload when the filter only ever keeps `context/tasks`/`context/concepts`
+    /// pages spent part of that budget on pages that were going to be thrown away, and on
+    /// the real vault (285 files across all four against 208 in the two that matter) that
+    /// was enough on its own to trip the deadline before the walk reached the pages the
+    /// count needed -- silently, since nothing here read `snapshot.timedOut`. Every toolbar
+    /// change already starts a fresh `reloadList`, so narrowing the walk to match does not
+    /// leave the folder popup stuck on a snapshot that never saw the wider folder.
+    static func walkTargets(for filter: WikiFilter) -> [String] {
+        let available = WikiIndex.indexableFolders + WikiIndex.optionalFolders
+        guard !filter.folders.isEmpty else { return WikiIndex.indexableFolders }
+        return available.filter(filter.folders.contains)
+    }
+
     /// The list the window shows: the stored filter, narrowed by the toolbar.
     ///
     /// Pure and static so the rule below can be asserted without a window.
@@ -688,14 +707,10 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
                 + " — 시스템 설정 → 개인정보 보호 및 보안 → 파일 및 폴더."
         }
 
+        let targets = Self.walkTargets(for: filter)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            // Every folder, always. The stored `folders` narrows the *list* a person is
-            // shown, and narrowing the walk to match would make the folder popup unable
-            // to widen it back.
             let outcome = Result {
-                try WikiIndex.shared.snapshot(
-                    root: root, folders: WikiIndex.indexableFolders + WikiIndex.optionalFolders
-                )
+                try WikiIndex.shared.snapshot(root: root, folders: targets)
             }
             DispatchQueue.main.async {
                 guard let self, token == self.reloadToken else { return }
@@ -729,6 +744,11 @@ final class WikiWindowController: NSObject, NSWindowDelegate {
                 : "\(kept.count)건"
             if !snapshot.skipped.isEmpty {
                 countLabel.stringValue += " · 읽지 못한 파일 \(snapshot.skipped.count)건"
+            }
+            // Same signal `WikiCommand`'s `printStatus` prints -- a walk that stopped early
+            // must not look like a walk that found only that many pages.
+            if snapshot.timedOut {
+                countLabel.stringValue += " · 순회 한도에 걸려 일부만 읽음"
             }
         case .failure(let error):
             pages = []
